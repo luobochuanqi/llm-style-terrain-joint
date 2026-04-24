@@ -14,6 +14,19 @@ class HeightMapVAE(AutoencoderKL):
 
     H_MAX = 3000.0  # 全局最大高程用于归一化
 
+    """
+    参数 AutoencoderKL
+    in_channels: int，可选，默认值为 3 输入图像的通道数。 
+    out_channels: int，可选，默认值为 3 输出通道数。 
+    down_block_types: ，可选，默认值为 下采样块类型的元组。 
+    up_block_types: ，可选，默认值为 上采样块类型的元组。 
+    block_out_channels: ，可选，默认值为 块输出通道的元组。 
+    act_fn: ，可选，默认值为 使用的激活函数。 
+    latent_channels: ，可选，默认值为 4 潜在空间的通道数。 
+    sample_size: ，可选，默认值为 样本输入大小。 
+    scaling_factor: ，可选，默认值为 0.18215
+    """
+
     def __init__(self):
         super().__init__(
             in_channels=1,
