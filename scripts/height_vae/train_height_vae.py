@@ -97,7 +97,7 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # 初始化优化器
-        self.optimizer = torch.optim.AdamW(
+        self.optimizer = torch.optim.AdamW (
             self.vae.parameters(),
             lr=LEARNING_RATE,
             betas=(ADAM_BETA1, ADAM_BETA2),
