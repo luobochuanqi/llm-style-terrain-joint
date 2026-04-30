@@ -76,36 +76,27 @@ class HeightMapVAE(AutoencoderKL):
     def compute_slope(self, height_map: torch.Tensor) -> torch.Tensor:
         """
         计算坡度（梯度幅值）
-        使用中心差分法计算 x 和 y 方向的梯度
+        使用中心差分法计算 x 和 y 方向的梯度，输出与输入等高宽
         """
-        # x 方向梯度（左右错位相减）
-        grad_x = height_map[:, :, :, 1:] - height_map[:, :, :, :-1]
-        # y 方向梯度（上下错位相减）
-        grad_y = height_map[:, :, 1:, :] - height_map[:, :, :-1, :]
-
-        # 梯度幅值
+        # Sobel-like 中心差分（包含padding，保持形状不变）
+        kernel_x = torch.tensor([-1, 0, 1], dtype=height_map.dtype, device=height_map.device).view(1, 1, 1, 3)
+        kernel_y = torch.tensor([-1, 0, 1], dtype=height_map.dtype, device=height_map.device).view(1, 1, 3, 1)
+        grad_x = F.conv2d(height_map, kernel_x, padding=(0, 1))  # [B,1,H,W]
+        grad_y = F.conv2d(height_map, kernel_y, padding=(1, 0))  # [B,1,H,W]
         slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
         return slope
 
     def compute_curvature(self, height_map: torch.Tensor) -> torch.Tensor:
         """
         计算曲率（二阶导数）
-        使用拉普拉斯算子近似
+        使用拉普拉斯算子近似，输出与输入等高宽
         """
-        # 二阶中心差分
-        dxx = (
-            height_map[:, :, :, 2:]
-            - 2 * height_map[:, :, :, 1:-1]
-            + height_map[:, :, :, :-2]
-        )
-        dyy = (
-            height_map[:, :, 2:, :]
-            - 2 * height_map[:, :, 1:-1, :]
-            + height_map[:, :, :-2, :]
-        )
-
-        # 平均曲率近似
-        curvature = (dxx + dyy) / 2.0
+        # 拉普拉斯核: [[0,1,0],[1,-4,1],[0,1,0]]
+        kernel = torch.tensor(
+            [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
+            dtype=height_map.dtype, device=height_map.device,
+        ).view(1, 1, 3, 3)
+        curvature = F.conv2d(height_map, kernel, padding=1)  # [B,1,H,W]
         return curvature
 
     def compute_geo_loss(
@@ -118,21 +109,11 @@ class HeightMapVAE(AutoencoderKL):
         # 坡度损失（一阶梯度）
         slope_pred = self.compute_slope(pred)
         slope_target = self.compute_slope(target)
-        # 对齐形状
-        min_h = min(slope_pred.shape[2], slope_target.shape[2])
-        min_w = min(slope_pred.shape[3], slope_target.shape[3])
-        slope_pred = slope_pred[:, :, :min_h, :min_w]
-        slope_target = slope_target[:, :, :min_h, :min_w]
         loss_slope = F.mse_loss(slope_pred, slope_target)
 
         # 曲率损失（二阶梯度）
         curvature_pred = self.compute_curvature(pred)
         curvature_target = self.compute_curvature(target)
-        # 对齐形状
-        min_h_c = min(curvature_pred.shape[2], curvature_target.shape[2])
-        min_w_c = min(curvature_pred.shape[3], curvature_target.shape[3])
-        curvature_pred = curvature_pred[:, :, :min_h_c, :min_w_c]
-        curvature_target = curvature_target[:, :, :min_h_c, :min_w_c]
         loss_curvature = F.mse_loss(curvature_pred, curvature_target)
 
         # 组合几何损失
@@ -154,7 +135,7 @@ class HeightMapVAE(AutoencoderKL):
             否则返回 (recon_height_map, loss_dict)
         """
         # 使用父类的编码器 - 解码器结构
-        posterior = self.encode(height_map)
+        posterior = self.encode(height_map).latent_dist
         latent = posterior.sample()
         recon = self.decode(latent).sample
 
