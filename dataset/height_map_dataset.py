@@ -28,6 +28,7 @@ class HeightMapDataset(Dataset):
         augment: bool = False,
         hflip_prob: float = 0.5,
         vflip_prob: float = 0.0,
+        rot90_prob: float = 0.5,
     ):
         super().__init__()
         self.data_root = data_root
@@ -35,6 +36,7 @@ class HeightMapDataset(Dataset):
         self.augment = augment
         self.hflip_prob = hflip_prob
         self.vflip_prob = vflip_prob
+        self.rot90_prob = rot90_prob
 
         self.file_list = sorted(glob.glob(os.path.join(data_root, "hmap_*.npy")))
         if len(self.file_list) == 0:
@@ -91,11 +93,15 @@ class HeightMapDataset(Dataset):
         return tensor, info
 
     def _apply_augment(self, tensor: torch.Tensor) -> torch.Tensor:
-        """随机水平/垂直翻转"""
+        """随机水平/垂直翻转 + 90° 倍数旋转"""
         if self.hflip_prob > 0 and torch.rand(1).item() < self.hflip_prob:
             tensor = torch.flip(tensor, dims=[-1])  # 水平翻转
 
         if self.vflip_prob > 0 and torch.rand(1).item() < self.vflip_prob:
             tensor = torch.flip(tensor, dims=[-2])  # 垂直翻转
+
+        if self.rot90_prob > 0 and torch.rand(1).item() < self.rot90_prob:
+            k = torch.randint(0, 4, (1,)).item()
+            tensor = torch.rot90(tensor, k, dims=[-2, -1])
 
         return tensor
