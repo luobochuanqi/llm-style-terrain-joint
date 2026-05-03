@@ -20,6 +20,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
@@ -76,6 +79,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTPUT_DIR = "./outputs/height_vae"
 CHECKPOINT_STEPS = 1000
 LOG_STEPS = 10
+VIZ_INTERVAL = 1  # 每隔 N 个 epoch 生成一张效果图
+VIZ_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "visualizations")
 
 
 class Trainer:
@@ -131,6 +136,16 @@ class Trainer:
         # 训练统计
         self.global_step = 0
         self.best_loss = float("inf")
+
+        # 可视化：loss 历史 + 固定验证样本
+        self.loss_history = []  # [(total, mse, kl, geo), ...]
+        val_iter = iter(dataloader)
+        self.val_sample, _ = next(val_iter)
+        self.val_sample = self.val_sample[:1]  # 只用第一个样本
+
+        # 创建可视化输出目录
+        self.viz_output_dir = Path(VIZ_OUTPUT_DIR)
+        self.viz_output_dir.mkdir(parents=True, exist_ok=True)
 
     def get_kl_weight(self, epoch: int) -> float:
         """获取当前 epoch 的 KL 权重（支持 annealing）"""
@@ -217,6 +232,106 @@ class Trainer:
             "loss_geo": avg_loss_geo,
         }
 
+    @torch.no_grad()
+    def visualize_epoch(self, epoch: int):
+        """
+        生成训练效果图（单样本重建对比 + loss 曲线）
+
+        Args:
+            epoch: 当前 epoch 编号
+        """
+        self.vae.eval()
+
+        val = self.val_sample.to(self.device)
+        recon = self.vae(val, return_recon_only=True)
+
+        # 转为 numpy
+        orig_np = val.squeeze().cpu().numpy()
+        recon_np = recon.squeeze().cpu().numpy()
+        error_np = np.abs(orig_np - recon_np)
+
+        # 历史数据
+        epochs = [h[0] for h in self.loss_history]
+        losses_total = [h[1] for h in self.loss_history]
+        losses_mse = [h[2] for h in self.loss_history]
+        losses_kl = [h[3] for h in self.loss_history]
+        losses_geo = [h[4] for h in self.loss_history]
+
+        # ---- 绘图 ----
+        fig = plt.figure(figsize=(16, 12))
+        fig.suptitle(f"HeightMapVAE Training — Epoch {epoch}", fontsize=14, fontweight="bold")
+
+        # 第 1 行：4 个 Loss 曲线（1×4）
+        ax1 = fig.add_subplot(3, 4, 1)
+        ax1.plot(epochs, losses_total, 'b-', linewidth=0.8)
+        ax1.set_title("Total Loss")
+        ax1.set_xlabel("Epoch")
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = fig.add_subplot(3, 4, 2)
+        ax2.plot(epochs, losses_mse, 'g-', linewidth=0.8)
+        ax2.set_title("MSE Loss")
+        ax2.set_xlabel("Epoch")
+        ax2.grid(True, alpha=0.3)
+
+        ax3 = fig.add_subplot(3, 4, 3)
+        ax3.plot(epochs, losses_kl, 'm-', linewidth=0.8)
+        ax3.set_title("KL Loss")
+        ax3.set_xlabel("Epoch")
+        ax3.grid(True, alpha=0.3)
+
+        ax4 = fig.add_subplot(3, 4, 4)
+        ax4.plot(epochs, losses_geo, 'r-', linewidth=0.8)
+        ax4.set_title("Geo Loss")
+        ax4.set_xlabel("Epoch")
+        ax4.grid(True, alpha=0.3)
+
+        # 第 2 行：原始 / 重建 / 误差热力图（1×3，位置 5-7）
+        ax5 = fig.add_subplot(3, 4, (5, 6))
+        im5 = ax5.imshow(orig_np, cmap='terrain')
+        ax5.set_title("Original")
+        plt.colorbar(im5, ax=ax5, fraction=0.046)
+
+        ax6 = fig.add_subplot(3, 4, (7, 8))
+        im6 = ax6.imshow(recon_np, cmap='terrain')
+        ax6.set_title("Reconstructed")
+        plt.colorbar(im6, ax=ax6, fraction=0.046)
+
+        ax7 = fig.add_subplot(3, 4, (9, 10))
+        im7 = ax7.imshow(error_np, cmap='hot')
+        ax7.set_title(f"|Error|  (max={error_np.max():.3f})")
+        plt.colorbar(im7, ax=ax7, fraction=0.046)
+
+        # 第 2 行右侧：高程剖线 + 误差统计
+        ax8 = fig.add_subplot(3, 4, (11, 12))
+        center_row = orig_np.shape[0] // 2
+        x = np.arange(orig_np.shape[1])
+        ax8.plot(x, orig_np[center_row, :], 'b-', linewidth=0.6, label='Original', alpha=0.8)
+        ax8.plot(x, recon_np[center_row, :], 'orange', linewidth=0.6, label='Reconstructed', alpha=0.8)
+        ax8.set_title(f"Elevation Profile (row {center_row})")
+        ax8.set_xlabel("Pixel")
+        ax8.legend(fontsize=8)
+        ax8.grid(True, alpha=0.3)
+
+        # 误差统计文字（剖线图上叠加）
+        mae = error_np.mean()
+        max_err = error_np.max()
+        ax8.text(
+            0.02, 0.98,
+            f"MAE: {mae:.5f}\nMax Error: {max_err:.5f}",
+            transform=ax8.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+        )
+
+        plt.tight_layout()
+        save_path = self.viz_output_dir / f"epoch_{epoch:04d}.png"
+        fig.savefig(save_path, dpi=100)
+        plt.close(fig)
+
+        self.vae.train()
+
     def train(self, num_epochs: int):
         """
         完整训练循环
@@ -263,6 +378,17 @@ class Trainer:
                 self.best_loss = loss_dict["loss"]
                 self.save_checkpoint(epoch, is_best=True)
 
+            # 记录 loss 历史并生成效果图
+            self.loss_history.append((
+                epoch,
+                loss_dict["loss"],
+                loss_dict["loss_mse"],
+                loss_dict["loss_kl"],
+                loss_dict["loss_geo"],
+            ))
+            if VIZ_INTERVAL > 0 and (epoch % VIZ_INTERVAL == 0 or epoch == num_epochs - 1):
+                self.visualize_epoch(epoch)
+
         # 保存最终检查点
         self.save_checkpoint(num_epochs - 1, is_final=True)
         print(f"\n训练完成！最佳 Loss: {self.best_loss:.4f}")
@@ -290,6 +416,7 @@ class Trainer:
             "scheduler_state_dict": self.scheduler.state_dict(),
             "global_step": self.global_step,
             "best_loss": self.best_loss,
+            "loss_history": self.loss_history,
         }
 
         # 保存文件名
@@ -321,6 +448,8 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.global_step = checkpoint["global_step"]
         self.best_loss = checkpoint["best_loss"]
+        if "loss_history" in checkpoint:
+            self.loss_history = checkpoint["loss_history"]
 
         print(f"加载检查点：{checkpoint_path}")
         print(f"  Epoch: {checkpoint['epoch']}")
