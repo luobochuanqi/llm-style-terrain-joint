@@ -34,13 +34,12 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-
 # ============================================================
 # 配置
 # ============================================================
-INPUT_DIR = "data/origin/heightmaps"
-OUTPUT_DIR = "data/process/heightmaps"
-PARAMS_FILE = "data/process/heightmaps/norm_params.json"
+INPUT_DIR = "data/origin/heightmaps_hf"
+OUTPUT_DIR = "data/process/heightmaps_hf"
+PARAMS_FILE = "data/process/heightmaps_hf/norm_params.json"
 
 ORIGINAL_SIZE = 1081
 CROP_SIZE = 1080
@@ -124,12 +123,13 @@ def compute_global_stats(input_dir: str, sample_ratio: float = 1.0):
 def center_crop_resize(arr: np.ndarray) -> np.ndarray:
     """中心裁剪到 1080×1080 → Area 缩放 → 512×512 float32"""
     h, w = arr.shape
-    assert h == ORIGINAL_SIZE and w == ORIGINAL_SIZE, \
-        f"期望 {ORIGINAL_SIZE}×{ORIGINAL_SIZE}，实际 {h}×{w}"
+    assert (
+        h == ORIGINAL_SIZE and w == ORIGINAL_SIZE
+    ), f"期望 {ORIGINAL_SIZE}×{ORIGINAL_SIZE}，实际 {h}×{w}"
 
     # 中心裁剪
     margin = (ORIGINAL_SIZE - CROP_SIZE) // 2
-    cropped = arr[margin:margin + CROP_SIZE, margin:margin + CROP_SIZE]
+    cropped = arr[margin : margin + CROP_SIZE, margin : margin + CROP_SIZE]
 
     # PIL Area 插值缩放（抗混叠）
     img = Image.fromarray(cropped)
@@ -179,6 +179,7 @@ def transform_all(input_dir: str, output_dir: str, params_file: str):
 
     # 也复制一份 norm_params.json 到输出目录（如果不在同一位置）
     import shutil
+
     dst_params = os.path.join(output_dir, "norm_params.json")
     if os.path.abspath(params_file) != os.path.abspath(dst_params):
         shutil.copy(params_file, dst_params)
@@ -209,9 +210,7 @@ def denormalize(norm_arr: np.ndarray, params: dict) -> np.ndarray:
 # CLI
 # ============================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="高度图数据集预处理（对数变换归一化）"
-    )
+    parser = argparse.ArgumentParser(description="高度图数据集预处理（对数变换归一化）")
     parser.add_argument(
         "--stage",
         choices=["stats", "transform", "all"],

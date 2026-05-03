@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Cache
+.kilo
+.ruff_cache
+
+# Outputs
+outputs

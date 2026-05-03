@@ -33,13 +33,19 @@ def scan_heightmaps(data_dir: str):
             print(f"  [警告/WARN] 无法解析文件名: {os.path.basename(fpath)}")
 
     print("文件名格式 / Filename pattern: hmap_{lon}_{lat}__{idx}.png")
-    print(f"  经度范围 / Longitude range: {min(lons)} .. {max(lons)}  "
-          f"(不重复数/unique: {len(set(lons))})")
-    print(f"  纬度范围 / Latitude range:  {min(lats)} .. {max(lats)}   "
-          f"(不重复数/unique: {len(set(lats))})")
+    print(
+        f"  经度范围 / Longitude range: {min(lons)} .. {max(lons)}  "
+        f"(不重复数/unique: {len(set(lons))})"
+    )
+    print(
+        f"  纬度范围 / Latitude range:  {min(lats)} .. {max(lats)}   "
+        f"(不重复数/unique: {len(set(lats))})"
+    )
     idx_set = set(idxs)
-    print(f"  idx 值 / idx values:      {sorted(idx_set)}  "
-          f"(不重复数/unique: {len(idx_set)})")
+    print(
+        f"  idx 值 / idx values:      {sorted(idx_set)}  "
+        f"(不重复数/unique: {len(idx_set)})"
+    )
     print("─" * 60)
 
     # ── 逐文件统计 / per-file statistics ──
@@ -68,8 +74,10 @@ def scan_heightmaps(data_dir: str):
 
     print("图像尺寸 / Image size (W×H):")
     for sz, cnt in sorted(sizes.items()):
-        print(f"  {sz[0]} × {sz[1]}  —  {cnt} 个文件/files  "
-              f"({cnt / total * 100:.1f}%)")
+        print(
+            f"  {sz[0]} × {sz[1]}  —  {cnt} 个文件/files  "
+            f"({cnt / total * 100:.1f}%)"
+        )
     print()
 
     print("像素模式/位深 / Pixel mode / bit depth:")
@@ -117,16 +125,24 @@ def scan_heightmaps(data_dir: str):
     # ── 坐标网格分布 / coordinate grid summary ──
     unique_lons = sorted(set(lons))
     unique_lats = sorted(set(lats))
-    gap_lons = [unique_lons[i+1] - unique_lons[i] for i in range(len(unique_lons)-1)]
-    gap_lats = [unique_lats[i+1] - unique_lats[i] for i in range(len(unique_lats)-1)]
+    gap_lons = [
+        unique_lons[i + 1] - unique_lons[i] for i in range(len(unique_lons) - 1)
+    ]
+    gap_lats = [
+        unique_lats[i + 1] - unique_lats[i] for i in range(len(unique_lats) - 1)
+    ]
     print()
     print("坐标网格间距 / Coordinate grid spacing:")
     if gap_lons:
-        print(f"  经度步长 / Longitude step:  {min(gap_lons)} .. {max(gap_lons)}  "
-              f"(中位数/median {np.median(gap_lons):.0f})")
+        print(
+            f"  经度步长 / Longitude step:  {min(gap_lons)} .. {max(gap_lons)}  "
+            f"(中位数/median {np.median(gap_lons):.0f})"
+        )
     if gap_lats:
-        print(f"  纬度步长 / Latitude step:   {min(gap_lats)} .. {max(gap_lats)}  "
-              f"(中位数/median {np.median(gap_lats):.0f})")
+        print(
+            f"  纬度步长 / Latitude step:   {min(gap_lats)} .. {max(gap_lats)}  "
+            f"(中位数/median {np.median(gap_lats):.0f})"
+        )
 
 
 def main():
@@ -136,7 +152,7 @@ def main():
     parser.add_argument(
         "data_dir",
         nargs="?",
-        default="data/origin/heightmaps",
+        default="data/origin/heightmaps_hf",
         help="高程图目录路径 / Path to heightmaps directory",
     )
     args = parser.parse_args()

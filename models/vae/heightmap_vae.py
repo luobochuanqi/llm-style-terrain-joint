@@ -27,7 +27,7 @@ class HeightMapVAE(AutoencoderKL):
     scaling_factor: ，可选，默认值为 0.18215
     """
 
-    def __init__(self):
+    def __init__(self, block_out_channels=(128, 256, 512), enable_grad_checkpointing=False):
         super().__init__(
             in_channels=1,
             out_channels=1,
@@ -41,15 +41,15 @@ class HeightMapVAE(AutoencoderKL):
                 "UpDecoderBlock2D",
                 "UpDecoderBlock2D",
             ],
-            block_out_channels=(128, 256, 512),
+            block_out_channels=block_out_channels,
             layers_per_block=2,
             act_fn="silu",
-            # 焊死 4 通道，与纹理 VAE 对齐
             latent_channels=4,
             sample_size=512,
-            # scaling_factor=0.18215,
             scaling_factor=1.0,
         )
+        if enable_grad_checkpointing:
+            self.enable_gradient_checkpointing()
 
     @staticmethod
     def normalize_height(height_map: torch.Tensor) -> torch.Tensor:
@@ -76,13 +76,19 @@ class HeightMapVAE(AutoencoderKL):
     def compute_slope(self, height_map: torch.Tensor) -> torch.Tensor:
         """
         计算坡度（梯度幅值）
-        使用中心差分法计算 x 和 y 方向的梯度，输出与输入等高宽
+        使用 3×3 Sobel 算子计算 x 和 y 方向的梯度，输出与输入等高宽
         """
-        # Sobel-like 中心差分（包含padding，保持形状不变）
-        kernel_x = torch.tensor([-1, 0, 1], dtype=height_map.dtype, device=height_map.device).view(1, 1, 1, 3)
-        kernel_y = torch.tensor([-1, 0, 1], dtype=height_map.dtype, device=height_map.device).view(1, 1, 3, 1)
-        grad_x = F.conv2d(height_map, kernel_x, padding=(0, 1))  # [B,1,H,W]
-        grad_y = F.conv2d(height_map, kernel_y, padding=(1, 0))  # [B,1,H,W]
+        # Sobel 3×3 算子：x 方向检测垂直边缘，y 方向检测水平边缘
+        sobel_x = torch.tensor(
+            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+            dtype=height_map.dtype, device=height_map.device,
+        ).view(1, 1, 3, 3)
+        sobel_y = torch.tensor(
+            [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+            dtype=height_map.dtype, device=height_map.device,
+        ).view(1, 1, 3, 3)
+        grad_x = F.conv2d(height_map, sobel_x, padding=1)  # [B,1,H,W]
+        grad_y = F.conv2d(height_map, sobel_y, padding=1)  # [B,1,H,W]
         slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
         return slope
 
