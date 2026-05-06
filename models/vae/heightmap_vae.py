@@ -28,19 +28,12 @@ class HeightMapVAE(AutoencoderKL):
     """
 
     def __init__(self, block_out_channels=(128, 256, 512), enable_grad_checkpointing=False):
+        num_blocks = len(block_out_channels)
         super().__init__(
             in_channels=1,
             out_channels=1,
-            down_block_types=[
-                "DownEncoderBlock2D",
-                "DownEncoderBlock2D",
-                "DownEncoderBlock2D",
-            ],
-            up_block_types=[
-                "UpDecoderBlock2D",
-                "UpDecoderBlock2D",
-                "UpDecoderBlock2D",
-            ],
+            down_block_types=["DownEncoderBlock2D"] * num_blocks,
+            up_block_types=["UpDecoderBlock2D"] * num_blocks,
             block_out_channels=block_out_channels,
             layers_per_block=2,
             act_fn="silu",
