@@ -62,7 +62,7 @@ from dataset.height_map_dataset import HeightMapDataset
 # 数据配置
 DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
-BATCH_SIZE = 1  # 显存充足时可调至 2-8
+BATCH_SIZE = 2  # 显存充足时可调至 2-8
 NUM_WORKERS = 4
 
 # 模型配置

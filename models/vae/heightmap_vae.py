@@ -35,8 +35,10 @@ class HeightMapVAE(AutoencoderKL):
                 "DownEncoderBlock2D",
                 "DownEncoderBlock2D",
                 "DownEncoderBlock2D",
+                "DownEncoderBlock2D",
             ],
             up_block_types=[
+                "UpDecoderBlock2D",
                 "UpDecoderBlock2D",
                 "UpDecoderBlock2D",
                 "UpDecoderBlock2D",

@@ -77,7 +77,7 @@ from dataset.height_map_dataset import HeightMapDataset
 # 数据配置
 DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
-BATCH_SIZE = 2  # 真实 batch，不做累积偏差
+BATCH_SIZE = 4 # 真实 batch，不做累积偏差
 NUM_WORKERS = 8  # 更快的 I/O
 
 # 模型配置
