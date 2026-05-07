@@ -121,7 +121,7 @@ class HeightMapVAE(AutoencoderKL):
         # 曲率损失（二阶梯度）
         curvature_pred = self.compute_curvature(pred)
         curvature_target = self.compute_curvature(target)
-        loss_curvature = F.mse_loss(curvature_pred, curvature_target)
+        loss_curvature = F.smooth_l1_loss(curvature_pred, curvature_target)
 
         # 组合几何损失
         loss_geo = loss_slope + 0.5 * loss_curvature
