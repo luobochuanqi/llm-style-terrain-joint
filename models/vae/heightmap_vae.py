@@ -151,11 +151,18 @@ class HeightMapVAE(AutoencoderKL):
 
         # 计算各项损失
         loss_mse = F.mse_loss(recon, height_map)
-        loss_kl = posterior.kl().mean()
         loss_geo = self.compute_geo_loss(recon, height_map)
 
-        # 组合损失
-        loss_vae = loss_mse + 1e-6 * loss_kl + 0.8 * loss_geo
+        # KL 散度：强制 fp32 计算 + 归一化到 per-dim 均值
+        # 必须禁用 autocast，因为 posterior.kl() 内部 exp(logvar) 在 fp16 下极易上溢
+        with torch.autocast(device_type=height_map.device.type, enabled=False):
+            kl_sum = posterior.kl()  # [B]，每个样本在所有隐维度求和
+            latent_shape = posterior.mean.shape  # [B, C, H, W]
+            num_latent_elems = latent_shape[1] * latent_shape[2] * latent_shape[3]
+            loss_kl = kl_sum.mean() / num_latent_elems  # per-dim 均值
+
+        # 组合损失（内部组合损失仅用于记录，外部 Trainer 自行组合权重）
+        loss_vae = loss_mse + 0.8 * loss_geo
 
         return recon, {
             "loss": loss_vae,
