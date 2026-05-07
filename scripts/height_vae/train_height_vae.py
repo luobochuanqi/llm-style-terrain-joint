@@ -83,13 +83,13 @@ GRAD_CLIP = 1.0
 GRADIENT_ACCUMULATION_STEPS = 8  # 模拟有效 batch=8，显存充足时可调至 1-4
 USE_AMP = False  # 混合精度（fp16）会与梯度检查点冲突；禁用后以 fp32 运行
 
-# 损失权重
+# 损失权重（loss_kl 已归一化为 per-dim 均值，范围为 0.05-10 nats/dim）
 LOSS_WEIGHT_MSE = 1.0
-LOSS_WEIGHT_KL = 5e-5  # β-VAE: 50× increase to prevent posterior collapse
+LOSS_WEIGHT_KL = 0.01   # per-dim KL 权重（当 kl≈0.1 时贡献 ≈ 0.001，远小于 MSE 0.02-0.08）
 LOSS_WEIGHT_GEO = 0.8
-KL_FREE_BITS_WEIGHT = 1e-4  # free bits 惩罚权重（应 > LOSS_WEIGHT_KL 以产生反向推力）
+KL_FREE_BITS_WEIGHT = 0.5  # per-dim free bits 惩罚权重
 KL_FREE_BITS_PER_DIM = 0.1  # 每维最低 0.1 nat，KL 低于此值会被强力上推
-KL_ANNEALING_EPOCHS = 25  # 延长退火让 autoencoder 先学好重建再引入 KL 正则
+KL_ANNEALING_EPOCHS = 50  # 延长退火让 autoencoder 先学好重建再引入 KL 正则
 USE_HUBER_LOSS = False  # SmoothL1 对高程跳变更鲁棒，beta 在计算时动态设为 0.01
 
 # 设备配置
@@ -128,7 +128,7 @@ class Trainer:
             gradient_accumulation_steps: 梯度累积步数
             kl_annealing_epochs: KL 退火 epoch 数
             use_huber_loss: 是否用 SmoothL1 替代 MSE
-            kl_free_bits_per_dim: 每维 KL free bits 阈值（0 禁用），低于阈值的 KL 不惩罚
+            kl_free_bits_per_dim: 每维 KL free bits 阈值（0 禁用），loss_kl 低于此值会被罚
         """
         self.vae = vae.to(device)
         self.dataloader = dataloader
@@ -138,11 +138,8 @@ class Trainer:
         self.kl_annealing_epochs = kl_annealing_epochs
         self.use_huber_loss = use_huber_loss
 
-        # Free bits: 潜在空间每维可免费使用的信息量 (nats)
-        self.kl_free_bits_target = (
-            kl_free_bits_per_dim * vae.config.latent_channels * (vae.config.sample_size // (2 ** (len(vae.config.block_out_channels) - 1))) ** 2
-            if kl_free_bits_per_dim > 0 else 0.0
-        )
+        # Free bits: loss_kl 已归一化为 per-dim 均值，target 直接取 per-dim 阈值
+        self.kl_free_bits_target = kl_free_bits_per_dim if kl_free_bits_per_dim > 0 else 0.0
 
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -211,8 +208,7 @@ class Trainer:
             loss_recon = F.smooth_l1_loss(recon, height_maps, beta=0.01) if self.use_huber_loss else loss_dict["loss_mse"]
             loss_kl = loss_dict["loss_kl"]
             loss_geo = loss_dict["loss_geo"]
-            # Free bits: 潜在空间每维最低信息量阈值
-            # 当 KL 低于此阈值时，强力上推以防止后验坍塌
+            # Free bits: 当 per-dim KL 低于阈值时施加向上推力，防止后验坍塌
             kl_free_bits_penalty = F.relu(self.kl_free_bits_target - loss_kl)
             loss_total = LOSS_WEIGHT_MSE * loss_recon + kl_weight * loss_kl + KL_FREE_BITS_WEIGHT * kl_free_bits_penalty + LOSS_WEIGHT_GEO * loss_geo
 

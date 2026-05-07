@@ -15,3 +15,6 @@ wheels/
 
 # Outputs
 outputs
+
+# AI doc
+AGENTS.md

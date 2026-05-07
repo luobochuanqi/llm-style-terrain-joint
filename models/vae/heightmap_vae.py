@@ -72,20 +72,22 @@ class HeightMapVAE(AutoencoderKL):
         使用 3×3 Sobel 算子计算 x 和 y 方向的梯度，输出与输入等高宽
 
         内部强制 fp32 计算，避免 AMP fp16 下 sqrt(eps==0) 的无穷梯度。
+        torch.autocast 会拦截 F.conv2d 并重铸为 fp16，因此必须显式禁用。
         """
-        hmap_f32 = height_map.float()
-        sobel_x = torch.tensor(
-            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-            dtype=torch.float32, device=height_map.device,
-        ).view(1, 1, 3, 3)
-        sobel_y = torch.tensor(
-            [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-            dtype=torch.float32, device=height_map.device,
-        ).view(1, 1, 3, 3)
-        grad_x = F.conv2d(hmap_f32, sobel_x, padding=1)  # [B,1,H,W]
-        grad_y = F.conv2d(hmap_f32, sobel_y, padding=1)  # [B,1,H,W]
-        slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
-        return slope
+        with torch.autocast(device_type=height_map.device.type, enabled=False):
+            hmap_f32 = height_map.float()
+            sobel_x = torch.tensor(
+                [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                dtype=torch.float32, device=height_map.device,
+            ).view(1, 1, 3, 3)
+            sobel_y = torch.tensor(
+                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                dtype=torch.float32, device=height_map.device,
+            ).view(1, 1, 3, 3)
+            grad_x = F.conv2d(hmap_f32, sobel_x, padding=1)  # [B,1,H,W]
+            grad_y = F.conv2d(hmap_f32, sobel_y, padding=1)  # [B,1,H,W]
+            slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
+            return slope
 
     def compute_curvature(self, height_map: torch.Tensor) -> torch.Tensor:
         """
@@ -93,14 +95,16 @@ class HeightMapVAE(AutoencoderKL):
         使用拉普拉斯算子近似，输出与输入等高宽
 
         内部强制 fp32 计算，避免 AMP fp16 下卷积精度损失。
+        torch.autocast 会拦截 F.conv2d 并重铸为 fp16，因此必须显式禁用。
         """
-        hmap_f32 = height_map.float()
-        kernel = torch.tensor(
-            [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-            dtype=torch.float32, device=height_map.device,
-        ).view(1, 1, 3, 3)
-        curvature = F.conv2d(hmap_f32, kernel, padding=1)  # [B,1,H,W]
-        return curvature
+        with torch.autocast(device_type=height_map.device.type, enabled=False):
+            hmap_f32 = height_map.float()
+            kernel = torch.tensor(
+                [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
+                dtype=torch.float32, device=height_map.device,
+            ).view(1, 1, 3, 3)
+            curvature = F.conv2d(hmap_f32, kernel, padding=1)  # [B,1,H,W]
+            return curvature
 
     def compute_geo_loss(
         self, pred: torch.Tensor, target: torch.Tensor
@@ -147,11 +151,18 @@ class HeightMapVAE(AutoencoderKL):
 
         # 计算各项损失
         loss_mse = F.mse_loss(recon, height_map)
-        loss_kl = posterior.kl().mean()
         loss_geo = self.compute_geo_loss(recon, height_map)
 
-        # 组合损失
-        loss_vae = loss_mse + 1e-6 * loss_kl + 0.8 * loss_geo
+        # KL 散度：强制 fp32 计算 + 归一化到 per-dim 均值
+        # 必须禁用 autocast，因为 posterior.kl() 内部 exp(logvar) 在 fp16 下极易上溢
+        with torch.autocast(device_type=height_map.device.type, enabled=False):
+            kl_sum = posterior.kl()  # [B]，每个样本在所有隐维度求和
+            latent_shape = posterior.mean.shape  # [B, C, H, W]
+            num_latent_elems = latent_shape[1] * latent_shape[2] * latent_shape[3]
+            loss_kl = kl_sum.mean() / num_latent_elems  # per-dim 均值
+
+        # 组合损失（内部组合损失仅用于记录，外部 Trainer 自行组合权重）
+        loss_vae = loss_mse + 0.8 * loss_geo
 
         return recon, {
             "loss": loss_vae,
