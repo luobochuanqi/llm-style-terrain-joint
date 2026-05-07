@@ -85,9 +85,11 @@ USE_AMP = False  # 混合精度（fp16）会与梯度检查点冲突；禁用后
 
 # 损失权重
 LOSS_WEIGHT_MSE = 1.0
-LOSS_WEIGHT_KL = 1e-6
+LOSS_WEIGHT_KL = 5e-5  # β-VAE: 50× increase to prevent posterior collapse
 LOSS_WEIGHT_GEO = 0.8
-KL_ANNEALING_EPOCHS = 5  # KL 权重从 0 线性增长到目标值的 epoch 数，0 禁用
+KL_FREE_BITS_WEIGHT = 1e-4  # free bits 惩罚权重（应 > LOSS_WEIGHT_KL 以产生反向推力）
+KL_FREE_BITS_PER_DIM = 0.1  # 每维最低 0.1 nat，KL 低于此值会被强力上推
+KL_ANNEALING_EPOCHS = 25  # 延长退火让 autoencoder 先学好重建再引入 KL 正则
 USE_HUBER_LOSS = False  # SmoothL1 对高程跳变更鲁棒，beta 在计算时动态设为 0.01
 
 # 设备配置
@@ -113,6 +115,7 @@ class Trainer:
         gradient_accumulation_steps: int = 1,
         kl_annealing_epochs: int = 0,
         use_huber_loss: bool = False,
+        kl_free_bits_per_dim: float = 0.0,
     ):
         """
         初始化训练器
@@ -125,6 +128,7 @@ class Trainer:
             gradient_accumulation_steps: 梯度累积步数
             kl_annealing_epochs: KL 退火 epoch 数
             use_huber_loss: 是否用 SmoothL1 替代 MSE
+            kl_free_bits_per_dim: 每维 KL free bits 阈值（0 禁用），低于阈值的 KL 不惩罚
         """
         self.vae = vae.to(device)
         self.dataloader = dataloader
@@ -133,6 +137,12 @@ class Trainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.kl_annealing_epochs = kl_annealing_epochs
         self.use_huber_loss = use_huber_loss
+
+        # Free bits: 潜在空间每维可免费使用的信息量 (nats)
+        self.kl_free_bits_target = (
+            kl_free_bits_per_dim * vae.config.latent_channels * (vae.config.sample_size // (2 ** (len(vae.config.block_out_channels) - 1))) ** 2
+            if kl_free_bits_per_dim > 0 else 0.0
+        )
 
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -201,7 +211,10 @@ class Trainer:
             loss_recon = F.smooth_l1_loss(recon, height_maps, beta=0.01) if self.use_huber_loss else loss_dict["loss_mse"]
             loss_kl = loss_dict["loss_kl"]
             loss_geo = loss_dict["loss_geo"]
-            loss_total = LOSS_WEIGHT_MSE * loss_recon + kl_weight * loss_kl + LOSS_WEIGHT_GEO * loss_geo
+            # Free bits: 潜在空间每维最低信息量阈值
+            # 当 KL 低于此阈值时，强力上推以防止后验坍塌
+            kl_free_bits_penalty = F.relu(self.kl_free_bits_target - loss_kl)
+            loss_total = LOSS_WEIGHT_MSE * loss_recon + kl_weight * loss_kl + KL_FREE_BITS_WEIGHT * kl_free_bits_penalty + LOSS_WEIGHT_GEO * loss_geo
 
             # 梯度累积
             loss_total = loss_total / self.gradient_accumulation_steps
@@ -670,6 +683,7 @@ def main():
             gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
             kl_annealing_epochs=KL_ANNEALING_EPOCHS,
             use_huber_loss=USE_HUBER_LOSS,
+            kl_free_bits_per_dim=KL_FREE_BITS_PER_DIM,
         )
 
         # 恢复训练（如果有检查点）

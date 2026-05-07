@@ -28,21 +28,12 @@ class HeightMapVAE(AutoencoderKL):
     """
 
     def __init__(self, block_out_channels=(128, 256, 512), enable_grad_checkpointing=False):
+        num_blocks = len(block_out_channels)
         super().__init__(
             in_channels=1,
             out_channels=1,
-            down_block_types=[
-                "DownEncoderBlock2D",
-                "DownEncoderBlock2D",
-                "DownEncoderBlock2D",
-                "DownEncoderBlock2D",
-            ],
-            up_block_types=[
-                "UpDecoderBlock2D",
-                "UpDecoderBlock2D",
-                "UpDecoderBlock2D",
-                "UpDecoderBlock2D",
-            ],
+            down_block_types=["DownEncoderBlock2D"] * num_blocks,
+            up_block_types=["UpDecoderBlock2D"] * num_blocks,
             block_out_channels=block_out_channels,
             layers_per_block=2,
             act_fn="silu",
@@ -79,18 +70,20 @@ class HeightMapVAE(AutoencoderKL):
         """
         计算坡度（梯度幅值）
         使用 3×3 Sobel 算子计算 x 和 y 方向的梯度，输出与输入等高宽
+
+        内部强制 fp32 计算，避免 AMP fp16 下 sqrt(eps==0) 的无穷梯度。
         """
-        # Sobel 3×3 算子：x 方向检测垂直边缘，y 方向检测水平边缘
+        hmap_f32 = height_map.float()
         sobel_x = torch.tensor(
             [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-            dtype=height_map.dtype, device=height_map.device,
+            dtype=torch.float32, device=height_map.device,
         ).view(1, 1, 3, 3)
         sobel_y = torch.tensor(
             [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-            dtype=height_map.dtype, device=height_map.device,
+            dtype=torch.float32, device=height_map.device,
         ).view(1, 1, 3, 3)
-        grad_x = F.conv2d(height_map, sobel_x, padding=1)  # [B,1,H,W]
-        grad_y = F.conv2d(height_map, sobel_y, padding=1)  # [B,1,H,W]
+        grad_x = F.conv2d(hmap_f32, sobel_x, padding=1)  # [B,1,H,W]
+        grad_y = F.conv2d(hmap_f32, sobel_y, padding=1)  # [B,1,H,W]
         slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
         return slope
 
@@ -98,13 +91,15 @@ class HeightMapVAE(AutoencoderKL):
         """
         计算曲率（二阶导数）
         使用拉普拉斯算子近似，输出与输入等高宽
+
+        内部强制 fp32 计算，避免 AMP fp16 下卷积精度损失。
         """
-        # 拉普拉斯核: [[0,1,0],[1,-4,1],[0,1,0]]
+        hmap_f32 = height_map.float()
         kernel = torch.tensor(
             [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-            dtype=height_map.dtype, device=height_map.device,
+            dtype=torch.float32, device=height_map.device,
         ).view(1, 1, 3, 3)
-        curvature = F.conv2d(height_map, kernel, padding=1)  # [B,1,H,W]
+        curvature = F.conv2d(hmap_f32, kernel, padding=1)  # [B,1,H,W]
         return curvature
 
     def compute_geo_loss(
