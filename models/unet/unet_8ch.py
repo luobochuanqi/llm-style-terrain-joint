@@ -10,7 +10,9 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
-
+from diffusers.models.embeddings import Timesteps, TimestepEmbedding
+from diffusers.models.unets.unet_2d_blocks import get_down_block, get_mid_block, get_up_block
+from diffusers.models.activations import get_activation
 
 class UNet8Channel(nn.Module):
     """
@@ -80,17 +82,92 @@ class UNet8Channel(nn.Module):
         # self.time_proj = Timesteps(...)
         # self.time_embedding = TimestepEmbedding(...)
 
+        time_embed_dim = self.block_out_channels[0] << 2
+
+        self.time_proj = Timesteps(num_channels=self.block_out_channels[0], flip_sin_to_cos=True, downscale_freq_shift=0)
+
+        self.time_embedding = TimestepEmbedding(
+            in_channels=self.block_out_channels[0], 
+            time_embed_dim=time_embed_dim, 
+            act_fn="silu"
+        )
+
         # TODO: 下采样模块 (Down Blocks)
         # 逐步降低空间分辨率，提取多层次特征
         # self.down_blocks = nn.ModuleList([...])
+
+        self.cov_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
+
+        self.down_blocks = nn.ModuleList([])
+
+        output_channel = block_out_channels[0]
+
+        for i, down_block_type in enumerate(down_block_types):
+
+            input_channel = output_channel
+
+            output_channel = block_out_channels[i]
+
+            is_final_block = i == len(down_block_types) - 1
+
+            down_block = get_down_block(
+                down_block_type=down_block_type,
+                num_layers=layers_per_block,
+                in_channels=input_channel,
+                out_channels=output_channel,
+                temb_channels=time_embed_dim,       # 【关键】把 TODO 1 里的时间广播线接进来
+                add_downsample=not is_final_block,  # 是否缩小长宽
+                resnet_eps=1e-5,
+                cross_attention_dim=cross_attention_dim, # 【关键】文本翻译官的接口尺寸 (如 1024)
+                num_attention_heads=attention_head_dim,
+            )
+
+            self.down_blocks.append(down_block)
 
         # TODO: 中间层 (Mid Block)
         # 在最低分辨率下进行更深层的特征提取
         # self.mid_block = UNetMidBlock2DCrossAttn(...)
 
+        self.mid_block = get_mid_block(
+            mid_block_type="UNetMidBlock2DCrossAttn",
+            in_channels=block_out_channels[-1],
+            temb_channels=time_embed_dim,           # 接上时间线
+            resnet_eps=1e-5,
+            cross_attention_dim=cross_attention_dim, # 接上文本线
+            num_attention_heads=attention_head_dim,
+        )
+
         # TODO: 上采样模块 (Up Blocks)
         # 逐步恢复空间分辨率，融合跳跃连接
         # self.up_blocks = nn.ModuleList([...])
+
+        self.up_blocks = nn.ModuleList([])
+        
+        # 上采样是倒着来的，所以要把通道数列表反转
+        reversed_block_out_channels = list(reversed(block_out_channels))
+        output_channel = reversed_block_out_channels[0]
+        
+        for i, up_block_type in enumerate(up_block_types):
+            prev_output_channel = output_channel
+            output_channel = reversed_block_out_channels[i]
+            # 这里的 input_channel 包含了跳跃连接拼接过来的额外通道
+            input_channel = reversed_block_out_channels[min(i + 1, len(block_out_channels) - 1)]
+            
+            is_final_block = i == len(block_out_channels) - 1
+
+            up_block = get_up_block(
+                up_block_type=up_block_type,
+                num_layers=layers_per_block + 1,    # 上采样层通常比下采样多一层 ResNet 用于消化拼接的特征
+                in_channels=input_channel,
+                out_channels=output_channel,
+                prev_output_channel=prev_output_channel,
+                temb_channels=time_embed_dim,
+                add_upsample=not is_final_block,    # 最后一层不需要再放大了
+                resnet_eps=1e-5,
+                cross_attention_dim=cross_attention_dim,
+                num_attention_heads=attention_head_dim,
+            )
+            self.up_blocks.append(up_block)
 
         # TODO: 输出层
         # 将特征映射回 8 通道噪声空间
@@ -121,6 +198,13 @@ class UNet8Channel(nn.Module):
             noise_pred: 预测的噪声 [B, 8, 64, 64]
         """
         # TODO: 完整的前向传播逻辑
+
+        t_emb = self.time_proj(timestep)
+
+        t_emb = t_emb.to(dtype = noisy_latent.dtype)
+
+        t_emb = self.time_embedding(t_emb)
+
 
         # 伪代码示意：
         # 1. 时间步嵌入
