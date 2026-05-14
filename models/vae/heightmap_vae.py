@@ -27,7 +27,9 @@ class HeightMapVAE(AutoencoderKL):
     scaling_factor: ，可选，默认值为 0.18215
     """
 
-    def __init__(self, block_out_channels=(128, 256, 512), enable_grad_checkpointing=False):
+    def __init__(
+        self, block_out_channels=(128, 256, 512), enable_grad_checkpointing=False
+    ):
         num_blocks = len(block_out_channels)
         super().__init__(
             in_channels=1,
@@ -78,11 +80,13 @@ class HeightMapVAE(AutoencoderKL):
             hmap_f32 = height_map.float()
             sobel_x = torch.tensor(
                 [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-                dtype=torch.float32, device=height_map.device,
+                dtype=torch.float32,
+                device=height_map.device,
             ).view(1, 1, 3, 3)
             sobel_y = torch.tensor(
                 [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-                dtype=torch.float32, device=height_map.device,
+                dtype=torch.float32,
+                device=height_map.device,
             ).view(1, 1, 3, 3)
             grad_x = F.conv2d(hmap_f32, sobel_x, padding=1)  # [B,1,H,W]
             grad_y = F.conv2d(hmap_f32, sobel_y, padding=1)  # [B,1,H,W]
@@ -101,7 +105,8 @@ class HeightMapVAE(AutoencoderKL):
             hmap_f32 = height_map.float()
             kernel = torch.tensor(
                 [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-                dtype=torch.float32, device=height_map.device,
+                dtype=torch.float32,
+                device=height_map.device,
             ).view(1, 1, 3, 3)
             curvature = F.conv2d(hmap_f32, kernel, padding=1)  # [B,1,H,W]
             return curvature
@@ -121,6 +126,7 @@ class HeightMapVAE(AutoencoderKL):
         # 曲率损失（二阶梯度）
         curvature_pred = self.compute_curvature(pred)
         curvature_target = self.compute_curvature(target)
+        # loss_curvature = F.mse_loss(curvature_pred, curvature_target)
         loss_curvature = F.smooth_l1_loss(curvature_pred, curvature_target)
 
         # 组合几何损失
