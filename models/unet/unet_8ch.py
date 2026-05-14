@@ -53,7 +53,7 @@ class UNet8Channel(nn.Module):
         block_out_channels: Tuple[int, ...] = (320, 640, 1280, 1280),
         layers_per_block: int = 2,
         attention_head_dim: int = 8,
-        cross_attention_dim: int = 512,
+        cross_attention_dim: int = 768,
         use_linear_projection: bool = True,
     ):
         """
@@ -121,8 +121,11 @@ class UNet8Channel(nn.Module):
                 temb_channels=time_embed_dim,       # 【关键】把 TODO 1 里的时间广播线接进来
                 add_downsample=not is_final_block,  # 是否缩小长宽
                 resnet_eps=1e-5,
+                resnet_act_fn="silu",
+                resnet_groups=32,
                 cross_attention_dim=cross_attention_dim, # 【关键】文本翻译官的接口尺寸 (如 1024)
                 num_attention_heads=attention_head_dim,
+                downsample_padding=1,
             )
 
             self.down_blocks.append(down_block)
@@ -136,6 +139,8 @@ class UNet8Channel(nn.Module):
             in_channels=block_out_channels[-1],
             temb_channels=time_embed_dim,           # 接上时间线
             resnet_eps=1e-5,
+            resnet_act_fn="silu",
+            resnet_groups=32,
             cross_attention_dim=cross_attention_dim, # 接上文本线
             num_attention_heads=attention_head_dim,
         )
@@ -167,6 +172,8 @@ class UNet8Channel(nn.Module):
                 temb_channels=time_embed_dim,
                 add_upsample=not is_final_block,    # 最后一层不需要再放大了
                 resnet_eps=1e-5,
+                resnet_act_fn="silu",
+                resnet_groups=32,
                 cross_attention_dim=cross_attention_dim,
                 num_attention_heads=attention_head_dim,
             )
@@ -200,7 +207,11 @@ class UNet8Channel(nn.Module):
         
         loss = loss_img + 1.5 * loss_dem
 
-        return loss
+        return {
+            "loss_img": loss_img, 
+            "loss_dem": loss_dem,
+            "loss": loss 
+        }
 
     def forward(
         self,
