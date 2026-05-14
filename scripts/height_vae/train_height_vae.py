@@ -39,7 +39,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
@@ -48,12 +49,13 @@ import numpy as np
 # 导入项目模块
 import sys
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, PROJECT_ROOT)
 
 from models.vae.heightmap_vae import HeightMapVAE
 from dataset.height_map_dataset import HeightMapDataset
-
 
 # =============================================================================
 # 训练配置（硬编码）
@@ -85,9 +87,11 @@ USE_AMP = False  # 混合精度（fp16）会与梯度检查点冲突；禁用后
 
 # 损失权重（loss_kl 已归一化为 per-dim 均值，范围为 0.05-10 nats/dim）
 LOSS_WEIGHT_MSE = 1.0
-LOSS_WEIGHT_KL = 0.01   # per-dim KL 权重（当 kl≈0.1 时贡献 ≈ 0.001，远小于 MSE 0.02-0.08）
+LOSS_WEIGHT_KL = (
+    0.01  # per-dim KL 权重（当 kl≈0.1 时贡献 ≈ 0.001，远小于 MSE 0.02-0.08）
+)
 LOSS_WEIGHT_GEO = 0.8
-KL_FREE_BITS_WEIGHT = 0.5  # per-dim free bits 惩罚权重
+KL_FREE_BITS_WEIGHT = 0.1  # per-dim free bits 惩罚权重
 KL_FREE_BITS_PER_DIM = 0.1  # 每维最低 0.1 nat，KL 低于此值会被强力上推
 KL_ANNEALING_EPOCHS = 50  # 延长退火让 autoencoder 先学好重建再引入 KL 正则
 USE_HUBER_LOSS = False  # SmoothL1 对高程跳变更鲁棒，beta 在计算时动态设为 0.01
@@ -139,7 +143,9 @@ class Trainer:
         self.use_huber_loss = use_huber_loss
 
         # Free bits: loss_kl 已归一化为 per-dim 均值，target 直接取 per-dim 阈值
-        self.kl_free_bits_target = kl_free_bits_per_dim if kl_free_bits_per_dim > 0 else 0.0
+        self.kl_free_bits_target = (
+            kl_free_bits_per_dim if kl_free_bits_per_dim > 0 else 0.0
+        )
 
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -205,12 +211,21 @@ class Trainer:
 
             # 前向传播
             recon, loss_dict = self.vae(height_maps, return_recon_only=False)
-            loss_recon = F.smooth_l1_loss(recon, height_maps, beta=0.01) if self.use_huber_loss else loss_dict["loss_mse"]
+            loss_recon = (
+                F.smooth_l1_loss(recon, height_maps, beta=0.01)
+                if self.use_huber_loss
+                else loss_dict["loss_mse"]
+            )
             loss_kl = loss_dict["loss_kl"]
             loss_geo = loss_dict["loss_geo"]
             # Free bits: 当 per-dim KL 低于阈值时施加向上推力，防止后验坍塌
             kl_free_bits_penalty = F.relu(self.kl_free_bits_target - loss_kl)
-            loss_total = LOSS_WEIGHT_MSE * loss_recon + kl_weight * loss_kl + KL_FREE_BITS_WEIGHT * kl_free_bits_penalty + LOSS_WEIGHT_GEO * loss_geo
+            loss_total = (
+                LOSS_WEIGHT_MSE * loss_recon
+                + kl_weight * loss_kl
+                + KL_FREE_BITS_WEIGHT * kl_free_bits_penalty
+                + LOSS_WEIGHT_GEO * loss_geo
+            )
 
             # 梯度累积
             loss_total = loss_total / self.gradient_accumulation_steps
@@ -286,46 +301,48 @@ class Trainer:
 
         # ---- 绘图 ----
         fig = plt.figure(figsize=(16, 12))
-        fig.suptitle(f"HeightMapVAE Training — Epoch {epoch}", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            f"HeightMapVAE Training — Epoch {epoch}", fontsize=14, fontweight="bold"
+        )
 
         # 第 1 行：4 个 Loss 曲线（1×4）
         ax1 = fig.add_subplot(3, 4, 1)
-        ax1.plot(epochs, losses_total, 'b-', linewidth=0.8)
+        ax1.plot(epochs, losses_total, "b-", linewidth=0.8)
         ax1.set_title("Total Loss")
         ax1.set_xlabel("Epoch")
         ax1.grid(True, alpha=0.3)
 
         ax2 = fig.add_subplot(3, 4, 2)
-        ax2.plot(epochs, losses_mse, 'g-', linewidth=0.8)
+        ax2.plot(epochs, losses_mse, "g-", linewidth=0.8)
         ax2.set_title("MSE Loss")
         ax2.set_xlabel("Epoch")
         ax2.grid(True, alpha=0.3)
 
         ax3 = fig.add_subplot(3, 4, 3)
-        ax3.plot(epochs, losses_kl, 'm-', linewidth=0.8)
+        ax3.plot(epochs, losses_kl, "m-", linewidth=0.8)
         ax3.set_title("KL Loss")
         ax3.set_xlabel("Epoch")
         ax3.grid(True, alpha=0.3)
 
         ax4 = fig.add_subplot(3, 4, 4)
-        ax4.plot(epochs, losses_geo, 'r-', linewidth=0.8)
+        ax4.plot(epochs, losses_geo, "r-", linewidth=0.8)
         ax4.set_title("Geo Loss")
         ax4.set_xlabel("Epoch")
         ax4.grid(True, alpha=0.3)
 
         # 第 2 行：原始 / 重建 / 误差热力图（1×3，位置 5-7）
         ax5 = fig.add_subplot(3, 4, (5, 6))
-        im5 = ax5.imshow(orig_np, cmap='terrain')
+        im5 = ax5.imshow(orig_np, cmap="terrain")
         ax5.set_title("Original")
         plt.colorbar(im5, ax=ax5, fraction=0.046)
 
         ax6 = fig.add_subplot(3, 4, (7, 8))
-        im6 = ax6.imshow(recon_np, cmap='terrain')
+        im6 = ax6.imshow(recon_np, cmap="terrain")
         ax6.set_title("Reconstructed")
         plt.colorbar(im6, ax=ax6, fraction=0.046)
 
         ax7 = fig.add_subplot(3, 4, (9, 10))
-        im7 = ax7.imshow(error_np, cmap='hot')
+        im7 = ax7.imshow(error_np, cmap="hot")
         ax7.set_title(f"|Error|  (max={error_np.max():.3f})")
         plt.colorbar(im7, ax=ax7, fraction=0.046)
 
@@ -333,8 +350,17 @@ class Trainer:
         ax8 = fig.add_subplot(3, 4, (11, 12))
         center_row = orig_np.shape[0] // 2
         x = np.arange(orig_np.shape[1])
-        ax8.plot(x, orig_np[center_row, :], 'b-', linewidth=0.6, label='Original', alpha=0.8)
-        ax8.plot(x, recon_np[center_row, :], 'orange', linewidth=0.6, label='Reconstructed', alpha=0.8)
+        ax8.plot(
+            x, orig_np[center_row, :], "b-", linewidth=0.6, label="Original", alpha=0.8
+        )
+        ax8.plot(
+            x,
+            recon_np[center_row, :],
+            "orange",
+            linewidth=0.6,
+            label="Reconstructed",
+            alpha=0.8,
+        )
         ax8.set_title(f"Elevation Profile (row {center_row})")
         ax8.set_xlabel("Pixel")
         ax8.legend(fontsize=8)
@@ -344,12 +370,13 @@ class Trainer:
         mae = error_np.mean()
         max_err = error_np.max()
         ax8.text(
-            0.02, 0.98,
+            0.02,
+            0.98,
             f"MAE: {mae:.5f}\nMax Error: {max_err:.5f}",
             transform=ax8.transAxes,
             fontsize=9,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
         )
 
         plt.tight_layout()
@@ -368,7 +395,14 @@ class Trainer:
         """
         print(f"开始训练：{num_epochs} epochs")
         print(f"设备：{self.device}")
-        print(f"批次大小：{BATCH_SIZE}" + (f" (有效: {BATCH_SIZE * self.gradient_accumulation_steps})" if self.gradient_accumulation_steps > 1 else ""))
+        print(
+            f"批次大小：{BATCH_SIZE}"
+            + (
+                f" (有效: {BATCH_SIZE * self.gradient_accumulation_steps})"
+                if self.gradient_accumulation_steps > 1
+                else ""
+            )
+        )
         print(f"学习率：{LEARNING_RATE}")
         print(f"梯度累积步数：{self.gradient_accumulation_steps}")
         print(
@@ -397,7 +431,11 @@ class Trainer:
                     f"KL: {loss_dict['loss_kl']:.4f} | "
                     f"Geo: {loss_dict['loss_geo']:.4f} | "
                     f"LR: {current_lr:.6f}"
-                    + (f" | KL_w: {self.get_kl_weight(epoch):.2e}" if self.kl_annealing_epochs > 0 else "")
+                    + (
+                        f" | KL_w: {self.get_kl_weight(epoch):.2e}"
+                        if self.kl_annealing_epochs > 0
+                        else ""
+                    )
                 )
 
             # 保存最佳模型
@@ -406,14 +444,18 @@ class Trainer:
                 self.save_checkpoint(epoch, is_best=True)
 
             # 记录 loss 历史并生成效果图
-            self.loss_history.append((
-                epoch,
-                loss_dict["loss"],
-                loss_dict["loss_mse"],
-                loss_dict["loss_kl"],
-                loss_dict["loss_geo"],
-            ))
-            if VIZ_INTERVAL > 0 and (epoch % VIZ_INTERVAL == 0 or epoch == num_epochs - 1):
+            self.loss_history.append(
+                (
+                    epoch,
+                    loss_dict["loss"],
+                    loss_dict["loss_mse"],
+                    loss_dict["loss_kl"],
+                    loss_dict["loss_geo"],
+                )
+            )
+            if VIZ_INTERVAL > 0 and (
+                epoch % VIZ_INTERVAL == 0 or epoch == num_epochs - 1
+            ):
                 self.visualize_epoch(epoch)
 
         # 保存最终检查点
@@ -532,9 +574,13 @@ def test_reconstruction(
     # 加载归一化参数（用于反归一化到物理高程）
     norm_params = load_norm_params(data_root)
     if norm_params:
-        print(f"已加载归一化参数: p_low={norm_params['p_low']:.1f}, p_high={norm_params['p_high']:.1f}")
+        print(
+            f"已加载归一化参数: p_low={norm_params['p_low']:.1f}, p_high={norm_params['p_high']:.1f}"
+        )
     else:
-        print("警告：未找到 norm_params.json，将使用原始 VAE denormalize_height（×3000）")
+        print(
+            "警告：未找到 norm_params.json，将使用原始 VAE denormalize_height（×3000）"
+        )
 
     # 创建测试数据集（不使用增强）
     dataset = HeightMapDataset(
@@ -562,7 +608,9 @@ def test_reconstruction(
             height_map_real = denormalize_to_elevation(height_map_np, norm_params)
             recon_real = denormalize_to_elevation(recon_np, norm_params)
             # 转回 tensor 用于计算误差
-            height_map_real_t = torch.from_numpy(height_map_real.astype(np.float32)).to(device)
+            height_map_real_t = torch.from_numpy(height_map_real.astype(np.float32)).to(
+                device
+            )
             recon_real_t = torch.from_numpy(recon_real.astype(np.float32)).to(device)
         else:
             height_map_real_t = HeightMapVAE.denormalize_height(height_map)
@@ -584,7 +632,9 @@ def test_reconstruction(
             output_file,
             original=height_map_real,
             reconstruction=recon_real,
-            error=np.abs(height_map_real.astype(np.float32) - recon_real.astype(np.float32)),
+            error=np.abs(
+                height_map_real.astype(np.float32) - recon_real.astype(np.float32)
+            ),
         )
         print(f"  保存到：{output_file}")
 
