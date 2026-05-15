@@ -23,20 +23,35 @@ Phase 3: 训练高度图专用 VAE
   - 目标显卡: 6-8 GB VRAM
 
 用法：
-    # 训练
-    python scripts/height_vae/train_height_vae.py --data_root ./data/height_maps --epochs 100
+    # 全新训练
+    python scripts/height_vae/train_height_vae.py --epochs 100
+
+    # 断点续训（训练中断后恢复）
+    python scripts/height_vae/train_height_vae.py --epochs 100 --checkpoint ./outputs/height_vae/checkpoint.pt
 
     # 测试重建质量
     python scripts/height_vae/train_height_vae.py --mode test --checkpoint ./outputs/height_vae/checkpoint.pt
 """
 
 import argparse
+import csv
+import glob
 import json
 import os
+import sys
+
+# 添加项目根目录到 sys.path，确保能导入 project modules
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+sys.path.insert(0, PROJECT_ROOT)
+# ruff: noqa: E402
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
+
+from models.vae.heightmap_vae import HeightMapVAE
+from dataset.height_map_dataset import HeightMapDataset
 
 import matplotlib
 
@@ -45,17 +60,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-
-# 导入项目模块
-import sys
-
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-sys.path.insert(0, PROJECT_ROOT)
-
-from models.vae.heightmap_vae import HeightMapVAE
-from dataset.height_map_dataset import HeightMapDataset
 
 # =============================================================================
 # 训练配置（硬编码）
@@ -66,6 +70,8 @@ DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
 BATCH_SIZE = 2  # 显存充足时可调至 2-8
 NUM_WORKERS = 4
+VAL_SPLIT = 0.1  # 验证集比例
+SEED = 42  # 数据集划分随机种子
 
 # 模型配置
 H_MAX = 3000.0  # 全局最大高程（仅用于 raw-elevation 场景，log 归一化数据不使用）
@@ -91,7 +97,7 @@ LOSS_WEIGHT_KL = (
     0.01  # per-dim KL 权重（当 kl≈0.1 时贡献 ≈ 0.001，远小于 MSE 0.02-0.08）
 )
 LOSS_WEIGHT_GEO = 0.8
-KL_FREE_BITS_WEIGHT = 0.1  # per-dim free bits 惩罚权重
+KL_FREE_BITS_WEIGHT = 0.5  # per-dim free bits 惩罚权重
 KL_FREE_BITS_PER_DIM = 0.1  # 每维最低 0.1 nat，KL 低于此值会被强力上推
 KL_ANNEALING_EPOCHS = 50  # 延长退火让 autoencoder 先学好重建再引入 KL 正则
 USE_HUBER_LOSS = False  # SmoothL1 对高程跳变更鲁棒，beta 在计算时动态设为 0.01
@@ -105,6 +111,7 @@ CHECKPOINT_STEPS = 1000
 LOG_STEPS = 10
 VIZ_INTERVAL = 1  # 每隔 N 个 epoch 生成一张效果图
 VIZ_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "visualizations")
+LOG_FILE = "training_log.csv"
 
 
 class Trainer:
@@ -113,29 +120,32 @@ class Trainer:
     def __init__(
         self,
         vae: HeightMapVAE,
-        dataloader: DataLoader,
+        train_dataloader: DataLoader,
         output_dir: str,
         device: str = "cuda",
         gradient_accumulation_steps: int = 1,
         kl_annealing_epochs: int = 0,
         use_huber_loss: bool = False,
         kl_free_bits_per_dim: float = 0.0,
+        val_dataloader: DataLoader | None = None,
     ):
         """
         初始化训练器
 
         Args:
             vae: 高度图 VAE 模型
-            dataloader: 数据加载器
+            train_dataloader: 训练数据加载器
             output_dir: 输出目录
             device: 运行设备
             gradient_accumulation_steps: 梯度累积步数
             kl_annealing_epochs: KL 退火 epoch 数
             use_huber_loss: 是否用 SmoothL1 替代 MSE
             kl_free_bits_per_dim: 每维 KL free bits 阈值（0 禁用），loss_kl 低于此值会被罚
+            val_dataloader: 验证数据加载器（用于可视化，不参与训练）
         """
         self.vae = vae.to(device)
-        self.dataloader = dataloader
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
         self.output_dir = Path(output_dir)
         self.device = device
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -170,13 +180,21 @@ class Trainer:
 
         # 可视化：loss 历史 + 固定验证样本
         self.loss_history = []  # [(total, mse, kl, geo), ...]
-        val_iter = iter(dataloader)
-        self.val_sample, _ = next(val_iter)
-        self.val_sample = self.val_sample[:1]  # 只用第一个样本
+        self.val_samples = self._init_val_samples()
 
         # 创建可视化输出目录
         self.viz_output_dir = Path(VIZ_OUTPUT_DIR)
         self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _init_val_samples(self) -> torch.Tensor | None:
+        """从验证集抽取一组固定样本用于可视化"""
+        if self.val_dataloader is None:
+            val_iter = iter(self.train_dataloader)
+            val_sample, _ = next(val_iter)
+            return val_sample[:1]
+        val_iter = iter(self.val_dataloader)
+        val_sample, _ = next(val_iter)
+        return val_sample[:1]
 
     def get_kl_weight(self, epoch: int) -> float:
         """获取当前 epoch 的 KL 权重（支持 annealing）"""
@@ -203,7 +221,7 @@ class Trainer:
         kl_weight = self.get_kl_weight(epoch)
 
         # 进度条
-        pbar = tqdm(self.dataloader, desc=f"Epoch {epoch}")
+        pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch}")
 
         for batch_idx, (height_maps, _) in enumerate(pbar):
             # 数据移到设备
@@ -284,7 +302,7 @@ class Trainer:
         """
         self.vae.eval()
 
-        val = self.val_sample.to(self.device)
+        val = self.val_samples.to(self.device)
         recon = self.vae(val, return_recon_only=True)
 
         # 转为 numpy
@@ -386,14 +404,18 @@ class Trainer:
 
         self.vae.train()
 
-    def train(self, num_epochs: int):
+    def train(self, num_epochs: int, start_epoch: int = 0):
         """
         完整训练循环
 
         Args:
-            num_epochs: 训练轮数
+            num_epochs: 目标训练轮数
+            start_epoch: 起始 epoch 编号（用于断点续训）
         """
-        print(f"开始训练：{num_epochs} epochs")
+        if start_epoch > 0:
+            print(f"断点续训：从 Epoch {start_epoch} 开始，目标 {num_epochs} epochs")
+        else:
+            print(f"开始训练：{num_epochs} epochs")
         print(f"设备：{self.device}")
         print(
             f"批次大小：{BATCH_SIZE}"
@@ -412,7 +434,18 @@ class Trainer:
             print(f"KL 退火：{self.kl_annealing_epochs} epochs 内从 0 线性增长")
         print("-" * 60)
 
-        for epoch in range(num_epochs):
+        # 打开日志文件（追加模式，自动处理断点续训）
+        log_path = self.output_dir / LOG_FILE
+        is_new_log = not log_path.exists() or log_path.stat().st_size == 0
+        log_f = open(log_path, "a")
+        log_writer = csv.writer(log_f)
+        if is_new_log:
+            log_writer.writerow(
+                ["epoch", "loss", "loss_mse", "loss_kl", "loss_geo", "lr", "kl_weight"]
+            )
+            log_f.flush()
+
+        for epoch in range(start_epoch, num_epochs):
             # 训练一个 epoch
             loss_dict = self.train_epoch(epoch)
 
@@ -421,6 +454,25 @@ class Trainer:
                 self.scheduler.step()
 
             current_lr = self.optimizer.param_groups[0]["lr"]
+            kl_weight = (
+                self.get_kl_weight(epoch)
+                if self.kl_annealing_epochs > 0
+                else LOSS_WEIGHT_KL
+            )
+
+            # 写入日志文件（每个 epoch 都记录）
+            log_writer.writerow(
+                [
+                    epoch,
+                    f"{loss_dict['loss']:.6f}",
+                    f"{loss_dict['loss_mse']:.6f}",
+                    f"{loss_dict['loss_kl']:.6f}",
+                    f"{loss_dict['loss_geo']:.6f}",
+                    f"{current_lr:.8f}",
+                    f"{kl_weight:.6e}",
+                ]
+            )
+            log_f.flush()
 
             # 打印日志
             if epoch % LOG_STEPS == 0 or epoch == num_epochs - 1:
@@ -460,6 +512,7 @@ class Trainer:
 
         # 保存最终检查点
         self.save_checkpoint(num_epochs - 1, is_final=True)
+        log_f.close()
         print(f"\n训练完成！最佳 Loss: {self.best_loss:.4f}")
 
     def save_checkpoint(
@@ -503,12 +556,14 @@ class Trainer:
             best_path = self.output_dir / "best_checkpoint.pt"
             torch.save(checkpoint, best_path)
 
-    def load_checkpoint(self, checkpoint_path: str):
+    def load_checkpoint(self, checkpoint_path: str) -> int:
         """
         加载检查点
 
         Args:
             checkpoint_path: 检查点路径
+        Returns:
+            start_epoch: 应从该 epoch 继续训练（已加载 epoch 的下一个）
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
@@ -520,10 +575,16 @@ class Trainer:
         if "loss_history" in checkpoint:
             self.loss_history = checkpoint["loss_history"]
 
+        saved_epoch = checkpoint["epoch"]
+        start_epoch = saved_epoch + 1
+
         print(f"加载检查点：{checkpoint_path}")
-        print(f"  Epoch: {checkpoint['epoch']}")
+        print(f"  已完成 Epoch: {saved_epoch}")
+        print(f"  将从 Epoch {start_epoch} 继续训练")
         print(f"  Global Step: {checkpoint['global_step']}")
         print(f"  Best Loss: {checkpoint['best_loss']:.4f}")
+
+        return start_epoch
 
 
 def load_norm_params(data_root: str) -> dict | None:
@@ -700,18 +761,52 @@ def main():
         # ==================== 训练模式 ====================
         print("=== 高度图 VAE 训练 ===")
 
-        # 创建数据加载器
-        dataloader = DataLoader(
-            HeightMapDataset(
-                data_root=args.data_root,
-                image_size=IMAGE_SIZE,
-                augment=True,  # 训练时使用增强
-            ),
+        # 创建数据集（先获取完整文件列表以支持确定性拆分）
+        full_file_list = sorted(glob.glob(os.path.join(args.data_root, "hmap_*.npy")))
+        generator = torch.Generator().manual_seed(SEED)
+        val_size = max(1, int(len(full_file_list) * VAL_SPLIT))
+        train_size = len(full_file_list) - val_size
+        train_indices, val_indices = random_split(
+            range(len(full_file_list)),
+            [train_size, val_size],
+            generator=generator,
+        )
+        train_file_list = [full_file_list[i] for i in train_indices.indices]
+        val_file_list = [full_file_list[i] for i in val_indices.indices]
+        print(
+            f"数据集划分：训练集 {len(train_file_list)} 样本, 验证集 {len(val_file_list)} 样本 (split={VAL_SPLIT})"
+        )
+
+        # 创建训练数据加载器
+        train_dataset = HeightMapDataset(
+            data_root=args.data_root,
+            image_size=IMAGE_SIZE,
+            augment=True,
+            file_list=train_file_list,
+        )
+        train_dataloader = DataLoader(
+            train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=NUM_WORKERS,
             pin_memory=True,
             drop_last=True,
+        )
+
+        # 创建验证数据加载器
+        val_dataset = HeightMapDataset(
+            data_root=args.data_root,
+            image_size=IMAGE_SIZE,
+            augment=False,
+            file_list=val_file_list,
+        )
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            drop_last=False,
         )
 
         # 创建模型（支持梯度检查点）
@@ -723,21 +818,23 @@ def main():
         # 创建训练器
         trainer = Trainer(
             vae=vae,
-            dataloader=dataloader,
+            train_dataloader=train_dataloader,
             output_dir=args.output_dir,
             device=DEVICE,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
             kl_annealing_epochs=KL_ANNEALING_EPOCHS,
             use_huber_loss=USE_HUBER_LOSS,
             kl_free_bits_per_dim=KL_FREE_BITS_PER_DIM,
+            val_dataloader=val_dataloader,
         )
 
         # 恢复训练（如果有检查点）
+        start_epoch = 0
         if args.checkpoint:
-            trainer.load_checkpoint(args.checkpoint)
+            start_epoch = trainer.load_checkpoint(args.checkpoint)
 
         # 开始训练
-        trainer.train(args.epochs)
+        trainer.train(args.epochs, start_epoch=start_epoch)
 
     elif args.mode == "test":
         # ==================== 测试模式 ====================

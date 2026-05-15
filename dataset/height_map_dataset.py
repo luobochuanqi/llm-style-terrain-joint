@@ -29,6 +29,7 @@ class HeightMapDataset(Dataset):
         hflip_prob: float = 0.5,
         vflip_prob: float = 0.0,
         rot90_prob: float = 0.5,
+        file_list: list | None = None,
     ):
         super().__init__()
         self.data_root = data_root
@@ -38,7 +39,10 @@ class HeightMapDataset(Dataset):
         self.vflip_prob = vflip_prob
         self.rot90_prob = rot90_prob
 
-        self.file_list = sorted(glob.glob(os.path.join(data_root, "hmap_*.npy")))
+        if file_list is not None:
+            self.file_list = sorted(file_list)
+        else:
+            self.file_list = sorted(glob.glob(os.path.join(data_root, "hmap_*.npy")))
         if len(self.file_list) == 0:
             raise FileNotFoundError(f"未找到 hmap_*.npy 文件: {data_root}")
 
@@ -71,6 +75,9 @@ class HeightMapDataset(Dataset):
         info = self.metadata[idx].copy()
 
         arr = np.load(self.file_list[idx])  # [H, W] float32
+
+        if not np.isfinite(arr).all():
+            raise ValueError(f"数据含 NaN/Inf: {self.file_list[idx]}")
 
         # 可选 resize（数据已为 target_size 时跳过）
         if arr.shape != (self.image_size, self.image_size):
