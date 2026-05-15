@@ -291,26 +291,38 @@ class Trainer:
 
             # 每 accumulation_steps 步更新一次权重
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                # 梯度 NaN 检测
-                grad_nan = any(
-                    not torch.isfinite(p.grad).all()
-                    for p in self.vae.parameters()
-                    if p.grad is not None
-                )
-                if grad_nan:
-                    print(
-                        f"[警告] Epoch {epoch}, batch {batch_idx}: 梯度包含 NaN/Inf，"
-                        f"跳过本次更新"
-                    )
-                    self.optimizer.zero_grad()
-                    continue
-
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
+                    # 梯度 NaN 检测（unscale 之后，梯度已还原为 fp32）
+                    grad_nan = any(
+                        not torch.isfinite(p.grad).all()
+                        for p in self.vae.parameters()
+                        if p.grad is not None
+                    )
+                    if grad_nan:
+                        print(
+                            f"[警告] Epoch {epoch}, batch {batch_idx}: 梯度包含 NaN/Inf，"
+                            f"跳过本次更新"
+                        )
+                        self.optimizer.zero_grad()
+                        continue
                     torch.nn.utils.clip_grad_norm_(self.vae.parameters(), GRAD_CLIP)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
+                    # 梯度 NaN 检测（无 AMP，梯度本身为 fp32）
+                    grad_nan = any(
+                        not torch.isfinite(p.grad).all()
+                        for p in self.vae.parameters()
+                        if p.grad is not None
+                    )
+                    if grad_nan:
+                        print(
+                            f"[警告] Epoch {epoch}, batch {batch_idx}: 梯度包含 NaN/Inf，"
+                            f"跳过本次更新"
+                        )
+                        self.optimizer.zero_grad()
+                        continue
                     torch.nn.utils.clip_grad_norm_(self.vae.parameters(), GRAD_CLIP)
                     self.optimizer.step()
                 self.optimizer.zero_grad()
