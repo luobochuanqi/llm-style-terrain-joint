@@ -83,7 +83,7 @@ import numpy as np
 # 数据配置
 DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
-BATCH_SIZE = 4 # 真实 batch，不做累积偏差
+BATCH_SIZE = 2  # 真实 batch，不做累积偏差
 NUM_WORKERS = 8  # 更快的 I/O
 VAL_SPLIT = 0.1  # 验证集比例
 SEED = 42  # 数据集划分随机种子
@@ -102,7 +102,7 @@ ADAM_BETA2 = 0.999
 # 训练配置
 NUM_EPOCHS = 100
 WARMUP_EPOCHS = 5
-GRAD_CLIP = 0.5
+GRAD_CLIP = 1.0
 GRADIENT_ACCUMULATION_STEPS = 1  # 不做梯度累积
 USE_AMP = True  # 混合精度 fp16 加速
 
