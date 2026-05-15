@@ -34,13 +34,16 @@ Phase 3: 训练高度图专用 VAE
 """
 
 import argparse
+import csv
 import glob
 import json
 import os
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
+
+from models.vae.heightmap_vae import HeightMapVAE
+from dataset.height_map_dataset import HeightMapDataset
 
 import matplotlib
 
@@ -57,9 +60,6 @@ PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 sys.path.insert(0, PROJECT_ROOT)
-
-from models.vae.heightmap_vae import HeightMapVAE
-from dataset.height_map_dataset import HeightMapDataset
 
 # =============================================================================
 # 训练配置（硬编码）
@@ -111,6 +111,7 @@ CHECKPOINT_STEPS = 1000
 LOG_STEPS = 10
 VIZ_INTERVAL = 1  # 每隔 N 个 epoch 生成一张效果图
 VIZ_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "visualizations")
+LOG_FILE = "training_log.csv"
 
 
 class Trainer:
@@ -433,6 +434,17 @@ class Trainer:
             print(f"KL 退火：{self.kl_annealing_epochs} epochs 内从 0 线性增长")
         print("-" * 60)
 
+        # 打开日志文件（追加模式，自动处理断点续训）
+        log_path = self.output_dir / LOG_FILE
+        is_new_log = not log_path.exists() or log_path.stat().st_size == 0
+        log_f = open(log_path, "a")
+        log_writer = csv.writer(log_f)
+        if is_new_log:
+            log_writer.writerow(
+                ["epoch", "loss", "loss_mse", "loss_kl", "loss_geo", "lr", "kl_weight"]
+            )
+            log_f.flush()
+
         for epoch in range(start_epoch, num_epochs):
             # 训练一个 epoch
             loss_dict = self.train_epoch(epoch)
@@ -442,6 +454,25 @@ class Trainer:
                 self.scheduler.step()
 
             current_lr = self.optimizer.param_groups[0]["lr"]
+            kl_weight = (
+                self.get_kl_weight(epoch)
+                if self.kl_annealing_epochs > 0
+                else LOSS_WEIGHT_KL
+            )
+
+            # 写入日志文件（每个 epoch 都记录）
+            log_writer.writerow(
+                [
+                    epoch,
+                    f"{loss_dict['loss']:.6f}",
+                    f"{loss_dict['loss_mse']:.6f}",
+                    f"{loss_dict['loss_kl']:.6f}",
+                    f"{loss_dict['loss_geo']:.6f}",
+                    f"{current_lr:.8f}",
+                    f"{kl_weight:.6e}",
+                ]
+            )
+            log_f.flush()
 
             # 打印日志
             if epoch % LOG_STEPS == 0 or epoch == num_epochs - 1:
@@ -481,6 +512,7 @@ class Trainer:
 
         # 保存最终检查点
         self.save_checkpoint(num_epochs - 1, is_final=True)
+        log_f.close()
         print(f"\n训练完成！最佳 Loss: {self.best_loss:.4f}")
 
     def save_checkpoint(
@@ -730,9 +762,7 @@ def main():
         print("=== 高度图 VAE 训练 ===")
 
         # 创建数据集（先获取完整文件列表以支持确定性拆分）
-        full_file_list = sorted(
-            glob.glob(os.path.join(args.data_root, "hmap_*.npy"))
-        )
+        full_file_list = sorted(glob.glob(os.path.join(args.data_root, "hmap_*.npy")))
         generator = torch.Generator().manual_seed(SEED)
         val_size = max(1, int(len(full_file_list) * VAL_SPLIT))
         train_size = len(full_file_list) - val_size
