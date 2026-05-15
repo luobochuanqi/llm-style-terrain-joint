@@ -719,9 +719,10 @@ def test_reconstruction(
     output_dir: str,
     device: str = "cuda",
     num_samples: int = 5,
+    file_list: list | None = None,
 ):
     """
-    测试重建质量
+    测试重建质量：将 num_samples 个样本的原始/重建/误差显示在一张图上
 
     Args:
         vae: VAE 模型
@@ -729,13 +730,13 @@ def test_reconstruction(
         output_dir: 输出目录
         device: 运行设备
         num_samples: 测试样本数
+        file_list: 指定文件列表（用于限定验证集），None 则使用全部数据
     """
     print("\n=== 测试重建质量 ===")
 
     vae.eval()
     vae.to(device)
 
-    # 加载归一化参数（用于反归一化到物理高程）
     norm_params = load_norm_params(data_root)
     if norm_params:
         print(
@@ -746,32 +747,30 @@ def test_reconstruction(
             "警告：未找到 norm_params.json，将使用原始 VAE denormalize_height（×3000）"
         )
 
-    # 创建测试数据集（不使用增强）
     dataset = HeightMapDataset(
         data_root=data_root,
         image_size=IMAGE_SIZE,
         augment=False,
+        file_list=file_list,
     )
 
-    # 创建输出目录
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # 测试前 num_samples 个样本
-    for i in range(min(num_samples, len(dataset))):
-        height_map, info = dataset[i]
-        height_map = height_map.unsqueeze(0).to(device)  # 添加 batch 维度
+    num_test = min(num_samples, len(dataset))
+    results = []
 
-        # 重建
+    for i in range(num_test):
+        height_map, info = dataset[i]
+        height_map = height_map.unsqueeze(0).to(device)
+
         recon = vae(height_map, return_recon_only=True)
 
-        # 反归一化到真实高程
         if norm_params:
             height_map_np = height_map.squeeze().cpu().numpy()
             recon_np = recon.squeeze().cpu().numpy()
             height_map_real = denormalize_to_elevation(height_map_np, norm_params)
             recon_real = denormalize_to_elevation(recon_np, norm_params)
-            # 转回 tensor 用于计算误差
             height_map_real_t = torch.from_numpy(height_map_real.astype(np.float32)).to(
                 device
             )
@@ -782,25 +781,77 @@ def test_reconstruction(
             height_map_real = height_map_real_t.squeeze().cpu().numpy()
             recon_real = recon_real_t.squeeze().cpu().numpy()
 
-        # 计算误差
+        error_real = np.abs(
+            height_map_real.astype(np.float32) - recon_real.astype(np.float32)
+        )
+
         mae = torch.abs(height_map_real_t - recon_real_t).mean().item()
         max_error = torch.abs(height_map_real_t - recon_real_t).max().item()
 
-        print(f"\n样本 {i + 1}: {info['file_path']}")
-        print(f"  MAE: {mae:.2f} m")
-        print(f"  Max Error: {max_error:.2f} m")
+        short_name = os.path.basename(info["file_path"])
+        print(f"样本 {i + 1}: {short_name}  MAE={mae:.2f}m  MaxErr={max_error:.2f}m")
 
-        # 保存结果（.npz 格式）
-        output_file = output_path / f"test_{i:03d}.npz"
-        np.savez(
-            output_file,
-            original=height_map_real,
-            reconstruction=recon_real,
-            error=np.abs(
-                height_map_real.astype(np.float32) - recon_real.astype(np.float32)
-            ),
+        results.append(
+            {
+                "name": short_name,
+                "original": height_map_real,
+                "recon": recon_real,
+                "error": error_real,
+                "mae": mae,
+                "max_error": max_error,
+            }
         )
-        print(f"  保存到：{output_file}")
+
+    # 在一张图上绘制所有测试结果
+    fig, axes = plt.subplots(num_test, 3, figsize=(15, 3 * num_test))
+    fig.suptitle(
+        "HeightMapVAE Full — Reconstruction Test Results",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    if num_test == 1:
+        axes = np.array([axes])
+
+    for row, (ax_row, res) in enumerate(zip(axes, results)):
+        vmin = min(res["original"].min(), res["recon"].min())
+        vmax = max(res["original"].max(), res["recon"].max())
+
+        im0 = ax_row[0].imshow(res["original"], cmap="terrain", vmin=vmin, vmax=vmax)
+        ax_row[0].set_title(f"Original [{res['name']}]", fontsize=9)
+        ax_row[0].axis("off")
+        plt.colorbar(im0, ax=ax_row[0], fraction=0.046)
+
+        im1 = ax_row[1].imshow(res["recon"], cmap="terrain", vmin=vmin, vmax=vmax)
+        ax_row[1].set_title("Reconstructed", fontsize=9)
+        ax_row[1].axis("off")
+        plt.colorbar(im1, ax=ax_row[1], fraction=0.046)
+
+        im2 = ax_row[2].imshow(res["error"], cmap="hot")
+        ax_row[2].set_title(
+            f"|Error|  MAE={res['mae']:.1f}m  Max={res['max_error']:.1f}m", fontsize=9
+        )
+        ax_row[2].axis("off")
+        plt.colorbar(im2, ax=ax_row[2], fraction=0.046)
+
+    plt.tight_layout()
+    save_path = output_path / "reconstruction_test.png"
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"合并对比图保存至：{save_path}")
+
+    # 单独保存每个样本的重建灰度图
+    for i, res in enumerate(results):
+        fig_single, ax_single = plt.subplots(1, 1, figsize=(6, 6))
+        ax_single.imshow(res["recon"], cmap="gray")
+        ax_single.set_title(f"Sample {i + 1}: {res['name']}", fontsize=9)
+        ax_single.axis("off")
+
+        plt.tight_layout()
+        single_path = output_path / f"sample_{i:03d}.png"
+        fig_single.savefig(single_path, dpi=150, bbox_inches="tight")
+        plt.close(fig_single)
+        print(f"  样本 {i + 1} 单独保存至：{single_path}")
 
     print("\n测试完成！")
 
@@ -955,6 +1006,19 @@ def main():
         checkpoint = torch.load(args.checkpoint, map_location=DEVICE)
         vae.load_state_dict(checkpoint["model_state_dict"])
 
+        # 使用验证集测试（与训练时相同划分方式，确保模型未见过这些数据）
+        full_file_list = sorted(glob.glob(os.path.join(args.data_root, "hmap_*.npy")))
+        generator = torch.Generator().manual_seed(SEED)
+        val_size = max(1, int(len(full_file_list) * VAL_SPLIT))
+        train_size = len(full_file_list) - val_size
+        _, val_indices = random_split(
+            range(len(full_file_list)),
+            [train_size, val_size],
+            generator=generator,
+        )
+        val_file_list = [full_file_list[i] for i in val_indices.indices]
+        print(f"测试数据：验证集 {len(val_file_list)} 样本")
+
         # 测试重建质量
         test_reconstruction(
             vae=vae,
@@ -962,6 +1026,7 @@ def main():
             output_dir=os.path.join(args.output_dir, "test_results"),
             device=DEVICE,
             num_samples=args.num_samples,
+            file_list=val_file_list,
         )
 
 
