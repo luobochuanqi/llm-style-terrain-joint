@@ -43,6 +43,28 @@ class HeightMapVAE(AutoencoderKL):
             sample_size=512,
             scaling_factor=1.0,
         )
+        self.register_buffer(
+            "sobel_x",
+            torch.tensor(
+                [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32
+            ).view(1, 1, 3, 3),
+            persistent=False,
+        )
+        self.register_buffer(
+            "sobel_y",
+            torch.tensor(
+                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32
+            ).view(1, 1, 3, 3),
+            persistent=False,
+        )
+        self.register_buffer(
+            "laplacian",
+            torch.tensor(
+                [[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32
+            ).view(1, 1, 3, 3),
+            persistent=False,
+        )
+
         if enable_grad_checkpointing:
             self.enable_gradient_checkpointing()
 
@@ -78,18 +100,8 @@ class HeightMapVAE(AutoencoderKL):
         """
         with torch.autocast(device_type=height_map.device.type, enabled=False):
             hmap_f32 = height_map.float()
-            sobel_x = torch.tensor(
-                [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-                dtype=torch.float32,
-                device=height_map.device,
-            ).view(1, 1, 3, 3)
-            sobel_y = torch.tensor(
-                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-                dtype=torch.float32,
-                device=height_map.device,
-            ).view(1, 1, 3, 3)
-            grad_x = F.conv2d(hmap_f32, sobel_x, padding=1)  # [B,1,H,W]
-            grad_y = F.conv2d(hmap_f32, sobel_y, padding=1)  # [B,1,H,W]
+            grad_x = F.conv2d(hmap_f32, self.sobel_x, padding=1)  # [B,1,H,W]
+            grad_y = F.conv2d(hmap_f32, self.sobel_y, padding=1)  # [B,1,H,W]
             slope = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
             return slope
 
@@ -103,12 +115,7 @@ class HeightMapVAE(AutoencoderKL):
         """
         with torch.autocast(device_type=height_map.device.type, enabled=False):
             hmap_f32 = height_map.float()
-            kernel = torch.tensor(
-                [[0, 1, 0], [1, -4, 1], [0, 1, 0]],
-                dtype=torch.float32,
-                device=height_map.device,
-            ).view(1, 1, 3, 3)
-            curvature = F.conv2d(hmap_f32, kernel, padding=1)  # [B,1,H,W]
+            curvature = F.conv2d(hmap_f32, self.laplacian, padding=1)  # [B,1,H,W]
             return curvature
 
     def compute_geo_loss(
@@ -150,7 +157,8 @@ class HeightMapVAE(AutoencoderKL):
         # 使用父类的编码器 - 解码器结构
         posterior = self.encode(height_map).latent_dist
         latent = posterior.sample()
-        recon = self.decode(latent).sample
+        with torch.autocast(device_type=height_map.device.type, enabled=False):
+            recon = self.decode(latent).sample
 
         if return_recon_only:
             return recon
