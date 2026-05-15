@@ -305,6 +305,8 @@ class Trainer:
                             f"跳过本次更新"
                         )
                         self.optimizer.zero_grad()
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
                         continue
                     torch.nn.utils.clip_grad_norm_(self.vae.parameters(), GRAD_CLIP)
                     self.scaler.step(self.optimizer)
