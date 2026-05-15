@@ -278,6 +278,7 @@ class Trainer:
                     f"recon={loss_recon.item():.4f}, kl={loss_kl.item():.4f}, "
                     f"geo={loss_geo.item():.4f} — 跳过该 batch"
                 )
+                self.optimizer.zero_grad()
                 continue
 
             # 梯度累积
@@ -537,6 +538,9 @@ class Trainer:
         for epoch in range(start_epoch, num_epochs):
             # 训练一个 epoch
             loss_dict = self.train_epoch(epoch)
+
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
 
             # 学习率调度（warmup 后开始）
             if epoch >= WARMUP_EPOCHS:
