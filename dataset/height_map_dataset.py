@@ -29,6 +29,7 @@ class HeightMapDataset(Dataset):
         hflip_prob: float = 0.5,
         vflip_prob: float = 0.0,
         rot90_prob: float = 0.5,
+        file_list: list | None = None,
     ):
         super().__init__()
         self.data_root = data_root
@@ -38,7 +39,10 @@ class HeightMapDataset(Dataset):
         self.vflip_prob = vflip_prob
         self.rot90_prob = rot90_prob
 
-        self.file_list = sorted(glob.glob(os.path.join(data_root, "hmap_*.npy")))
+        if file_list is not None:
+            self.file_list = sorted(file_list)
+        else:
+            self.file_list = sorted(glob.glob(os.path.join(data_root, "hmap_*.npy")))
         if len(self.file_list) == 0:
             raise FileNotFoundError(f"未找到 hmap_*.npy 文件: {data_root}")
 

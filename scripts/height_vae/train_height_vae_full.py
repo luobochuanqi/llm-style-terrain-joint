@@ -46,12 +46,13 @@ Phase 3: 训练高度图专用 VAE
 """
 
 import argparse
+import glob
 import json
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 import matplotlib
 
@@ -81,6 +82,8 @@ DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
 BATCH_SIZE = 2  # 真实 batch，不做累积偏差
 NUM_WORKERS = 8  # 更快的 I/O
+VAL_SPLIT = 0.1  # 验证集比例
+SEED = 42  # 数据集划分随机种子
 
 # 模型配置
 H_MAX = 3000.0  # 全局最大高程（仅用于 raw-elevation 场景，log 归一化数据不使用）
@@ -128,7 +131,7 @@ class Trainer:
     def __init__(
         self,
         vae: HeightMapVAE,
-        dataloader: DataLoader,
+        train_dataloader: DataLoader,
         output_dir: str,
         device: str = "cuda",
         gradient_accumulation_steps: int = 1,
@@ -136,13 +139,14 @@ class Trainer:
         use_huber_loss: bool = False,
         use_amp: bool = False,
         kl_free_bits_per_dim: float = 0.0,
+        val_dataloader: DataLoader | None = None,
     ):
         """
         初始化训练器
 
         Args:
             vae: 高度图 VAE 模型
-            dataloader: 数据加载器
+            train_dataloader: 训练数据加载器
             output_dir: 输出目录
             device: 运行设备
             gradient_accumulation_steps: 梯度累积步数
@@ -150,9 +154,11 @@ class Trainer:
             use_huber_loss: 是否用 SmoothL1 替代 MSE
             use_amp: 是否使用混合精度 (torch.cuda.amp)
             kl_free_bits_per_dim: 每维 KL free bits 阈值（0 禁用），loss_kl 低于此值会被罚
+            val_dataloader: 验证数据加载器（用于可视化，不参与训练）
         """
         self.vae = vae.to(device)
-        self.dataloader = dataloader
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
         self.output_dir = Path(output_dir)
         self.device = device
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -193,13 +199,21 @@ class Trainer:
 
         # 可视化：loss 历史 + 固定验证样本
         self.loss_history = []  # [(total, mse, kl, geo), ...]
-        val_iter = iter(dataloader)
-        self.val_sample, _ = next(val_iter)
-        self.val_sample = self.val_sample[:1]  # 只用第一个样本
+        self.val_samples = self._init_val_samples()
 
         # 创建可视化输出目录
         self.viz_output_dir = Path(VIZ_OUTPUT_DIR)
         self.viz_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _init_val_samples(self) -> torch.Tensor | None:
+        """从验证集抽取一组固定样本用于可视化"""
+        if self.val_dataloader is None:
+            val_iter = iter(self.train_dataloader)
+            val_sample, _ = next(val_iter)
+            return val_sample[:1]
+        val_iter = iter(self.val_dataloader)
+        val_sample, _ = next(val_iter)
+        return val_sample[:1]
 
     def get_kl_weight(self, epoch: int) -> float:
         """获取当前 epoch 的 KL 权重（支持 annealing）"""
@@ -226,7 +240,7 @@ class Trainer:
         kl_weight = self.get_kl_weight(epoch)
 
         # 进度条
-        pbar = tqdm(self.dataloader, desc=f"Epoch {epoch}")
+        pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch}")
 
         for batch_idx, (height_maps, _) in enumerate(pbar):
             # 数据移到设备
@@ -318,7 +332,7 @@ class Trainer:
         """
         self.vae.eval()
 
-        val = self.val_sample.to(self.device)
+        val = self.val_samples.to(self.device)
         recon = self.vae(val, return_recon_only=True)
 
         # 转为 numpy
@@ -751,18 +765,54 @@ def main():
         # ==================== 训练模式 ====================
         print("=== 高度图 VAE 训练（效果优先版） ===")
 
-        # 创建数据加载器
-        dataloader = DataLoader(
-            HeightMapDataset(
-                data_root=args.data_root,
-                image_size=IMAGE_SIZE,
-                augment=True,  # 训练时使用增强
-            ),
+        # 创建数据集（先获取完整文件列表以支持确定性拆分）
+        full_file_list = sorted(
+            glob.glob(os.path.join(args.data_root, "hmap_*.npy"))
+        )
+        generator = torch.Generator().manual_seed(SEED)
+        val_size = max(1, int(len(full_file_list) * VAL_SPLIT))
+        train_size = len(full_file_list) - val_size
+        train_indices, val_indices = random_split(
+            range(len(full_file_list)),
+            [train_size, val_size],
+            generator=generator,
+        )
+        train_file_list = [full_file_list[i] for i in train_indices.indices]
+        val_file_list = [full_file_list[i] for i in val_indices.indices]
+        print(
+            f"数据集划分：训练集 {len(train_file_list)} 样本, 验证集 {len(val_file_list)} 样本 (split={VAL_SPLIT})"
+        )
+
+        # 创建训练数据加载器
+        train_dataset = HeightMapDataset(
+            data_root=args.data_root,
+            image_size=IMAGE_SIZE,
+            augment=True,
+            file_list=train_file_list,
+        )
+        train_dataloader = DataLoader(
+            train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=NUM_WORKERS,
             pin_memory=True,
             drop_last=True,
+        )
+
+        # 创建验证数据加载器
+        val_dataset = HeightMapDataset(
+            data_root=args.data_root,
+            image_size=IMAGE_SIZE,
+            augment=False,
+            file_list=val_file_list,
+        )
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            drop_last=False,
         )
 
         # 创建模型（不使用梯度检查点，保留完整计算图）
@@ -774,7 +824,7 @@ def main():
         # 创建训练器（启用 AMP）
         trainer = Trainer(
             vae=vae,
-            dataloader=dataloader,
+            train_dataloader=train_dataloader,
             output_dir=args.output_dir,
             device=DEVICE,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
@@ -782,6 +832,7 @@ def main():
             use_huber_loss=USE_HUBER_LOSS,
             use_amp=USE_AMP,
             kl_free_bits_per_dim=KL_FREE_BITS_PER_DIM,
+            val_dataloader=val_dataloader,
         )
 
         # 恢复训练（如果有检查点）
