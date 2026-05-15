@@ -53,6 +53,14 @@ import csv
 import glob
 import json
 import os
+import sys
+
+# 添加项目根目录到 sys.path，确保能导入 project modules
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+sys.path.insert(0, PROJECT_ROOT)
+# ruff: noqa: E402
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -67,15 +75,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-
-# 导入项目模块
-import sys
-
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-sys.path.insert(0, PROJECT_ROOT)
-
 
 # =============================================================================
 # 训练配置（硬编码 — 效果优先）
