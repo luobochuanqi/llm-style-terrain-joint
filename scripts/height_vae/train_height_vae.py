@@ -68,7 +68,7 @@ import numpy as np
 # 数据配置
 DATA_ROOT = "./data/process/heightmaps_hf"
 IMAGE_SIZE = 512
-BATCH_SIZE = 2  # 显存充足时可调至 2-8
+BATCH_SIZE = 1  # 显存充足时可调至 2-8
 NUM_WORKERS = 4
 VAL_SPLIT = 0.1  # 验证集比例
 SEED = 42  # 数据集划分随机种子
@@ -161,7 +161,7 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # 初始化优化器
-        self.optimizer = torch.optim.AdamW (
+        self.optimizer = torch.optim.AdamW(
             self.vae.parameters(),
             lr=LEARNING_RATE,
             betas=(ADAM_BETA1, ADAM_BETA2),
