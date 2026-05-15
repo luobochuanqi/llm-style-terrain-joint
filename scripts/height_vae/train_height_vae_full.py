@@ -196,6 +196,7 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
             T_max=NUM_EPOCHS - WARMUP_EPOCHS,
+            eta_min=LEARNING_RATE * 1e-3,  # 避免 LR 归零导致参数停止更新
         )
 
         # 训练统计
@@ -271,6 +272,15 @@ class Trainer:
                     + LOSS_WEIGHT_GEO * loss_geo
                 )
 
+            # NaN 检测：任一 loss 分量为 NaN/Inf 则跳过该 batch
+            if not torch.isfinite(loss_total):
+                print(
+                    f"[警告] Epoch {epoch}, batch {batch_idx}: loss_total={loss_total.item():.4f}, "
+                    f"recon={loss_recon.item():.4f}, kl={loss_kl.item():.4f}, "
+                    f"geo={loss_geo.item():.4f} — 跳过该 batch"
+                )
+                continue
+
             # 梯度累积
             loss_total = loss_total / self.gradient_accumulation_steps
 
@@ -282,6 +292,20 @@ class Trainer:
 
             # 每 accumulation_steps 步更新一次权重
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                # 梯度 NaN 检测
+                grad_nan = any(
+                    not torch.isfinite(p.grad).all()
+                    for p in self.vae.parameters()
+                    if p.grad is not None
+                )
+                if grad_nan:
+                    print(
+                        f"[警告] Epoch {epoch}, batch {batch_idx}: 梯度包含 NaN/Inf，"
+                        f"跳过本次更新"
+                    )
+                    self.optimizer.zero_grad()
+                    continue
+
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.vae.parameters(), GRAD_CLIP)

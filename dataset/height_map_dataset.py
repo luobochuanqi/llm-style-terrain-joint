@@ -76,6 +76,9 @@ class HeightMapDataset(Dataset):
 
         arr = np.load(self.file_list[idx])  # [H, W] float32
 
+        if not np.isfinite(arr).all():
+            raise ValueError(f"数据含 NaN/Inf: {self.file_list[idx]}")
+
         # 可选 resize（数据已为 target_size 时跳过）
         if arr.shape != (self.image_size, self.image_size):
             from PIL import Image
