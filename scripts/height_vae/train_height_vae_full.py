@@ -38,8 +38,11 @@ Phase 3: 训练高度图专用 VAE
   预估显存                   |  ~2.5-3.5 GB         |  ~6-10 GB
 
 用法：
-    # 训练
+    # 全新训练
     python scripts/height_vae/train_height_vae_full.py --epochs 100
+
+    # 断点续训（训练中断后恢复）
+    python scripts/height_vae/train_height_vae_full.py --epochs 100 --checkpoint ./outputs/height_vae_full/checkpoint.pt
 
     # 测试重建质量
     python scripts/height_vae/train_height_vae_full.py --mode test --checkpoint ./outputs/height_vae_full/checkpoint.pt
@@ -436,14 +439,18 @@ class Trainer:
 
         self.vae.train()
 
-    def train(self, num_epochs: int):
+    def train(self, num_epochs: int, start_epoch: int = 0):
         """
         完整训练循环
 
         Args:
-            num_epochs: 训练轮数
+            num_epochs: 目标训练轮数
+            start_epoch: 起始 epoch 编号（用于断点续训）
         """
-        print(f"开始训练：{num_epochs} epochs")
+        if start_epoch > 0:
+            print(f"断点续训：从 Epoch {start_epoch} 开始，目标 {num_epochs} epochs")
+        else:
+            print(f"开始训练：{num_epochs} epochs")
         print(f"设备：{self.device}")
         print(
             f"批次大小：{BATCH_SIZE}"
@@ -468,7 +475,7 @@ class Trainer:
             print(f"KL 退火：{self.kl_annealing_epochs} epochs 内从 0 线性增长")
         print("-" * 60)
 
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             # 训练一个 epoch
             loss_dict = self.train_epoch(epoch)
 
@@ -566,12 +573,14 @@ class Trainer:
             best_path = self.output_dir / "best_checkpoint.pt"
             torch.save(checkpoint, best_path)
 
-    def load_checkpoint(self, checkpoint_path: str):
+    def load_checkpoint(self, checkpoint_path: str) -> int:
         """
         加载检查点
 
         Args:
             checkpoint_path: 检查点路径
+        Returns:
+            start_epoch: 应从该 epoch 继续训练（已加载 epoch 的下一个）
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
@@ -585,10 +594,16 @@ class Trainer:
         if "scaler_state_dict" in checkpoint and self.scaler is not None:
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
+        saved_epoch = checkpoint["epoch"]
+        start_epoch = saved_epoch + 1
+
         print(f"加载检查点：{checkpoint_path}")
-        print(f"  Epoch: {checkpoint['epoch']}")
+        print(f"  已完成 Epoch: {saved_epoch}")
+        print(f"  将从 Epoch {start_epoch} 继续训练")
         print(f"  Global Step: {checkpoint['global_step']}")
         print(f"  Best Loss: {checkpoint['best_loss']:.4f}")
+
+        return start_epoch
 
 
 def load_norm_params(data_root: str) -> dict | None:
@@ -836,11 +851,12 @@ def main():
         )
 
         # 恢复训练（如果有检查点）
+        start_epoch = 0
         if args.checkpoint:
-            trainer.load_checkpoint(args.checkpoint)
+            start_epoch = trainer.load_checkpoint(args.checkpoint)
 
         # 开始训练
-        trainer.train(args.epochs)
+        trainer.train(args.epochs, start_epoch=start_epoch)
 
     elif args.mode == "test":
         # ==================== 测试模式 ====================
