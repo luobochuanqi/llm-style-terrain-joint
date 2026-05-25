@@ -11,7 +11,7 @@
 import torch
 import torch.nn as nn
 from typing import Tuple, Dict, Optional
-
+from diffusers import DDIMScheduler
 
 class InferencePipeline:
     """
@@ -47,6 +47,14 @@ class InferencePipeline:
         self.texture_vae = texture_vae
         self.device = device
         self.num_inference_steps = num_inference_steps
+        self.scheduler = DDIMScheduler(
+            num_train_timesteps=1000,           
+            beta_start=0.00085,                 
+            beta_end=0.012,                     
+            beta_schedule="scaled_linear",      
+            clip_sample=False,
+            set_alpha_to_one=False,
+        )
 
         # 将所有模型移到指定设备并设置为评估模式
         self.unet.to(device).eval()
@@ -66,7 +74,15 @@ class InferencePipeline:
             local_features: 细节特征向量 [1, N, D_local]
         """
         # TODO: 实现双分支 CLIP 编码
-        raise NotImplementedError("文本编码功能待实现")
+        with torch.no_grad():
+
+            text_output = self.text_encoder(prompt)
+
+            global_features = text_output.pooler_output
+
+            local_features = text_output.last_hidden_state
+
+        return global_features, local_features
 
     def create_initial_noise(self) -> torch.Tensor:
         """

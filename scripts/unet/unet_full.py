@@ -26,6 +26,8 @@ import matplotlib
 matplotlib.use("Agg") # 极其重要：防止在无 GUI 的 AutoDL 服务器上画图报错
 import matplotlib.pyplot as plt
 from pathlib import Path
+from PIL import Image
+import numpy as np
 
 import sys
 # 退三层：train_unet_full.py -> unet -> scripts -> 项目根目录
@@ -57,7 +59,7 @@ OUTPUT_DIR = "./outputs/unet_8ch"   # 模型和图片输出的根目录
 
 EPOCHS = 50
 BATCH_SIZE = 4
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 3e-5
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 4
 USE_AMP = True                      # 是否开启 fp16 混合精度加速
@@ -116,7 +118,7 @@ def build_8ch_unet_from_sd(device = "cuda"):
     unet.config.in_channels = 8
     unet.config.out_channels = 8
 
-    print("正在冻结基础权重，解冻注意力层与头尾层...")
+    print("正在执行阶梯式解冻")
 
     unet.requires_grad_(False)
 
@@ -125,6 +127,12 @@ def build_8ch_unet_from_sd(device = "cuda"):
 
     for name, param in unet.named_parameters():
         if "attn2" in name: 
+            param.requires_grad = True
+
+        elif "attn1" in name:
+            param.requires_grad = True
+        
+        elif "down_blocks.0" in name or "down_blocks.1" in name:
             param.requires_grad = True
 
     trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
@@ -229,6 +237,12 @@ class UNetTrainer:
 
         print(f"验证样本准备就绪，提示词: {self.val_prompt[0]}")
 
+        prompt_output = self.viz_output_dir / "prompt.txt"
+
+        with open(prompt_output, "w", encoding="utf-8") as f:
+
+            f.write(self.val_prompt[0])
+
     def encode_to_latent(self, rgb_pixels, dem_pixels):
         """核心魔法：把像素变成隐向量，并设立 64x64 绝对屏障"""
         # 1. 官方 VAE，绝对标准的 64x64
@@ -286,7 +300,7 @@ class UNetTrainer:
                 timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (batch_size,), device=self.device).long()
                 noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # [✨ 核心修复 1]：对接官方 U-Net 前向传播 API
+                # [核心修复 1]：对接官方 U-Net 前向传播 API
                 output = self.unet(
                     sample=noisy_latents,
                     timestep=timesteps,
@@ -294,7 +308,7 @@ class UNetTrainer:
                 )
                 noise_pred = output.sample
                 
-                # [✨ 核心修复 2]：手动计算通道均方误差 (MSE Loss)
+                # [核心修复 2]：手动计算通道均方误差 (MSE Loss)
                 loss_img = F.mse_loss(noise_pred[:, :4, :, :], noise[:, :4, :, :])
                 loss_dem = F.mse_loss(noise_pred[:, 4:, :, :], noise[:, 4:, :, :])
                 loss = loss_img + loss_dem
@@ -362,7 +376,7 @@ class UNetTrainer:
         self.noise_scheduler.set_timesteps(50)
         
         for t in tqdm(self.noise_scheduler.timesteps, desc="Sampling Image"):
-            # [✨ 核心修复 3]：可视化时的逆向扩散推断 API
+            # [核心修复 3]：可视化时的逆向扩散推断 API
             output = self.unet(
                 sample=latents,
                 timestep=t.unsqueeze(0).to(self.device),
@@ -387,6 +401,15 @@ class UNetTrainer:
         
         gen_rgb_np = rgb_image[0].permute(1, 2, 0).cpu().numpy()
         gen_dem_np = dem_image[0][0].cpu().numpy()
+
+        latest_output_dir = self.viz_output_dir / "latest_output"
+        latest_output_dir.mkdir(parents=True, exist_ok=True)
+
+        rgb_save_array = (gen_rgb_np * 255).astype(np.uint8)
+        dem_save_array = (gen_dem_np * 65535.0).astype(np.uint16)
+
+        Image.fromarray(rgb_save_array).save(latest_output_dir / "latest_texture.png")
+        Image.fromarray(dem_save_array, mode='I;16').save(latest_output_dir / "latest_heightmap.png")
 
         # ==========================================
         # 4. 绘制 2行4列 的终极大图
