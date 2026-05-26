@@ -1,97 +1,143 @@
 """
-双分支 CLIP 文本编码器
+CLIP 双分支文本编码器
+
+将文本 Prompt 编码为两组特征：
+    1. 全局特征向量（pooled 输出）—— 捕捉整体语义
+    2. 序列级特征（hidden states）—— 捕捉局部细节，供交叉注意力使用
+
+基于 HuggingFace transformers 的 CLIPTextModel 实现。
 """
 
 import torch
 import torch.nn as nn
-from typing import Tuple, List
-# 引入 Hugging Face 的分词器和 CLIP 文本模型
-from transformers import CLIPTokenizer, CLIPTextModel
+from typing import Tuple
+
+from transformers import CLIPTextModel, CLIPTokenizer
+
 
 class DualBranchCLIPEncoder(nn.Module):
     """
-    双分支 CLIP 文本编码器
+    CLIP 双分支文本编码器。
 
-    将文本 Prompt 编码为两种特征：
-    1. 全局特征向量：捕捉整体语义
-    2. 细节特征向量：捕捉局部细节
+    全局分支：返回 CLIP 的 pooler_output [B, hidden_size]，
+    序列分支：返回 last_hidden_state [B, seq_len, hidden_size]。
+    两者均可经可选投影层映射到自定义维度，默认使用 CLIP 原生维度。
+
+    参数
+    ----------
+    model_name : str
+        HuggingFace CLIP 模型名称（默认 ``openai/clip-vit-large-patch14``，hidden_size=768）。
+    global_dim : int or None
+        全局特征输出维度，None 则使用 CLIP 原生维度。
+    local_dim : int or None
+        序列特征输出维度，None 则使用 CLIP 原生维度。
     """
 
     def __init__(
         self,
         model_name: str = "openai/clip-vit-large-patch14",
-        global_dim: int = 768,
-        local_dim: int = 768,
+        global_dim: int | None = None,
+        local_dim: int | None = None,
     ):
-        """
-        初始化双分支 CLIP 编码器
-        """
         super().__init__()
 
-        # 1. 加载预训练的 Tokenizer 和 CLIP 模型
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
-        self.clip_model = CLIPTextModel.from_pretrained(model_name)
+        self.text_encoder = CLIPTextModel.from_pretrained(model_name)
 
-        # 关键点：冻结 CLIP 模型的参数，防止在训练 UNet 时更新它，节省大量显存
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
+        hidden_size = self.text_encoder.config.hidden_size
+        self.hidden_size = hidden_size
+        self._global_dim = global_dim or hidden_size
+        self._local_dim = local_dim or hidden_size
 
-        # 获取 CLIP 模型默认的隐藏层维度（base 通常是 512，large 通常是 768）
-        hidden_size = self.clip_model.config.hidden_size
+        self.global_proj = (
+            nn.Linear(hidden_size, self._global_dim)
+            if self._global_dim != hidden_size
+            else nn.Identity()
+        )
+        self.local_proj = (
+            nn.Linear(hidden_size, self._local_dim)
+            if self._local_dim != hidden_size
+            else nn.Identity()
+        )
 
-        # 2. 全局特征投影层
-        self.global_proj = nn.Linear(hidden_size, global_dim)
+    @property
+    def cross_attention_dim(self) -> int:
+        """交叉注意力所需的文本特征维度。"""
+        return self._local_dim
 
-        # 3. 细节特征投影层
-        self.local_proj = nn.Linear(hidden_size, local_dim)
+    @property
+    def device(self) -> torch.device:
+        return next(self.text_encoder.parameters()).device
 
-    def forward(
-        self,
-        prompts: List[str],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        前向传播
+    def freeze(self) -> None:
+        """冻结 CLIP 参数，仅保留投影层可训练（如有）。"""
+        self.text_encoder.eval()
+        self.text_encoder.requires_grad_(False)
 
-        Args:
-            prompts: Prompt 字符串列表
-        Returns:
-            global_features: 全局特征向量 [B, global_dim]
-            local_features: 细节特征向量 [B, N, local_dim]
-        """
-        
-        # 1. 获取当前模型所在的设备 (GPU/CPU)
-        device = self.clip_model.device
-
-        # 2. 分词：将文本字符串变成模型能看懂的 Token ID
-        text_inputs = self.tokenizer(
+    def _tokenize(self, prompts: list[str]) -> dict:
+        """分词并移到模型所在设备。"""
+        inputs = self.tokenizer(
             prompts,
             padding="max_length",
+            max_length=self.tokenizer.model_max_length,
             truncation=True,
-            max_length=77, # CLIP 的标准最大长度
             return_tensors="pt",
-        ).to(device)       # 确保数据和模型在同一个显卡上
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
 
-        # 3. 送入 CLIP 提取特征（使用 torch.no_grad() 进一步确保不计算梯度）
-        with torch.no_grad():
-            outputs = self.clip_model(**text_inputs)
+    def forward(
+        self, prompts: list[str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        编码文本 Prompt。
 
-        # 4. 提取并映射【全局特征】
-        # pooler_output 通常是句子结尾符 [EOS] 经过特定映射后的结果，代表全句语义
-        global_features = outputs.pooler_output  # 形状: [B, hidden_size]
-        global_features = self.global_proj(global_features)  # 形状: [B, global_dim]
+        参数
+        ----------
+        prompts : list[str]
+            文本字符串列表。
 
-        # 5. 提取并映射【细节特征】
-        # last_hidden_state 包含了输入句子中所有 77 个 Token 的独立特征
-        local_features = outputs.last_hidden_state  # 形状: [B, 77, hidden_size]
-        local_features = self.local_proj(local_features)  # 形状: [B, 77, local_dim]
+        返回
+        -------
+        global_features : Tensor
+            全局特征 [B, global_dim]。
+        local_features : Tensor
+            序列特征 [B, seq_len, local_dim]。
+        """
+        tokenized = self._tokenize(prompts)
+        outputs = self.text_encoder(**tokenized)
+
+        global_features = self.global_proj(outputs.pooler_output)
+        local_features = self.local_proj(outputs.last_hidden_state)
 
         return global_features, local_features
 
 
 def build_text_encoder(
-    model_name: str = "openai/clip-vit-base-patch32",
+    model_name: str = "openai/clip-vit-large-patch14",
+    global_dim: int | None = None,
+    local_dim: int | None = None,
 ) -> DualBranchCLIPEncoder:
     """
-    构建文本编码器工厂函数
+    工厂函数：构建并冻结 CLIP 双分支编码器。
+
+    参数
+    ----------
+    model_name : str
+        HuggingFace CLIP 模型名称。
+    global_dim : int or None
+        全局特征维度。
+    local_dim : int or None
+        序列特征维度。
+
+    返回
+    -------
+    DualBranchCLIPEncoder
+        已冻结的编码器实例。
     """
-    return DualBranchCLIPEncoder(model_name=model_name)
+    encoder = DualBranchCLIPEncoder(
+        model_name=model_name,
+        global_dim=global_dim,
+        local_dim=local_dim,
+    )
+    encoder.freeze()
+    return encoder

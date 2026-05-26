@@ -74,10 +74,7 @@ def scan_heightmaps(data_dir: str):
 
     print("图像尺寸 / Image size (W×H):")
     for sz, cnt in sorted(sizes.items()):
-        print(
-            f"  {sz[0]} × {sz[1]}  —  {cnt} 个文件/files  "
-            f"({cnt / total * 100:.1f}%)"
-        )
+        print(f"  {sz[0]} × {sz[1]}  —  {cnt} 个文件/files  ({cnt / total * 100:.1f}%)")
     print()
 
     print("像素模式/位深 / Pixel mode / bit depth:")
@@ -105,7 +102,7 @@ def scan_heightmaps(data_dir: str):
     print()
 
     print("空间分辨率 / Spatial resolution（从文件名推断 / inferred from filename）:")
-    print(f"  每块瓦片覆盖 1° × 1°（经/纬度均为整数网格索引）")
+    print("  每块瓦片覆盖 1° × 1°（经/纬度均为整数网格索引）")
     print(f"  图像尺寸 {1081} × {1081} px → ~{1081 / 3600:.1f} px/角秒 (arc-second)")
     print(f"  (1° ≈ 111 km → ~{1081 / 111:.0f} m/像素 at equator)")
     print()

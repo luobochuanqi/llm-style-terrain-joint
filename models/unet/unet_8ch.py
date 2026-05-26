@@ -1,37 +1,63 @@
 """
-8 通道 U-Net 模型
+8通道 U-Net 模型 —— 纹理与高程联合扩散
 
-根据 roadmap 描述：
-- 输入：脏图 z_t (8 通道) + 时间步 t + 文本特征向量
-- 输出：预测的噪声 epsilon_pred (8 通道)
-- 使用交叉注意力层（Cross-Attention）融入文本条件
+本模块实现文本条件的 8 通道 U-Net，用于高度图 + 纹理的隐空间联合生成。
+文本条件通过两条路径注入：
+
+    1. 全局特征（CLIP pooled 输出）经线性投影后叠加到时间步嵌入上，统一调制所有残差块。
+    2. 序列级特征（CLIP hidden states）作为 encoder_hidden_states 传入交叉注意力层，
+       实现空间感知的条件控制。
+
+结构概览：
+    输入  [B, 8, 64, 64]   (4 通道高度 + 4 通道纹理)
+      conv_in  →  [B, 320, 64, 64]
+      Down blocks (3×CrossAttn + 1×Down)  →  多层特征
+      Mid block (CrossAttn)                →  瓶颈
+      Up blocks (1×Up + 3×CrossAttn)       →  跳跃连接重建
+      conv_out  →  [B, 8, 64, 64]
+    输出: 预测噪声
 """
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
-from typing import Optional, Tuple
+from torch import nn
+from typing import Tuple
+
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
-from diffusers.models.unets.unet_2d_blocks import get_down_block, get_mid_block, get_up_block
+from diffusers.models.unets.unet_2d_blocks import (
+    get_down_block,
+    get_mid_block,
+    get_up_block,
+)
 from diffusers.models.activations import get_activation
+
 
 class UNet8Channel(nn.Module):
     """
-    8 通道 U-Net 模型
+    文本条件的 8 通道 U-Net，用于纹理与高程联合去噪。
 
-    输入：
-        - noisy_latent: 带噪联合隐向量 [B, 8, 64, 64]
-        - timestep: 时间步 [B]
-        - global_features: 全局文本特征 [B, D_global]
-        - local_features: 细节文本特征 [B, N, D_local]
-
-    输出：
-        - noise_pred: 预测的噪声 [B, 8, 64, 64]
-
-    结构特点：
-        - 输入/输出均为 8 通道（4 通道高程 + 4 通道纹理）
-        - 使用交叉注意力层融入文本条件
-        - 时间步通过嵌入层加入网络
+    参数
+    ----------
+    in_channels : int
+        输入通道数，默认 8。
+    out_channels : int
+        输出通道数，默认 8。
+    down_block_types : tuple of str
+        下采样路径中各 block 的类型序列。
+    up_block_types : tuple of str
+        上采样路径中各 block 的类型序列。
+    block_out_channels : tuple of int
+        每个 block 的输出通道数。
+    layers_per_block : int
+        每个下采样/中间 block 的 ResNet 层数。
+        上采样 block 自动使用 ``layers_per_block + 1`` 层，
+        多出的一层用于消化跳跃连接拼接后的特征。
+    attention_head_dim : int
+        交叉注意力中每个注意力头的维度。
+    cross_attention_dim : int
+        文本编码器输出的特征维度（如 CLIP ViT-L/14 为 768）。
+    use_linear_projection : bool
+        为 attention 投影方式预留的参数，当前未使用。
     """
 
     def __init__(
@@ -56,61 +82,45 @@ class UNet8Channel(nn.Module):
         cross_attention_dim: int = 768,
         use_linear_projection: bool = True,
     ):
-        """
-        初始化 8 通道 U-Net
-
-        Args:
-            in_channels: 输入通道数（固定为 8）
-            out_channels: 输出通道数（固定为 8）
-            down_block_types: 下采样块类型元组
-            up_block_types: 上采样块类型元组
-            block_out_channels: 各块输出通道数
-            layers_per_block: 每个块的 ResNet 层数
-            attention_head_dim: 注意力头维度
-            cross_attention_dim: 交叉注意力维度（文本特征维度）
-            use_linear_projection: 是否使用线性投影
-        """
         super().__init__()
 
-        # 保存配置参数
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.block_out_channels = block_out_channels
         self.layers_per_block = layers_per_block
 
-        # TODO: 时间步嵌入层
-        # 将时间步 t 编码为向量，加入到网络中
-        # self.time_proj = Timesteps(...)
-        # self.time_embedding = TimestepEmbedding(...)
+        time_embed_dim = self.block_out_channels[0] * 4
 
-        time_embed_dim = self.block_out_channels[0] << 2
-
-        self.time_proj = Timesteps(num_channels=self.block_out_channels[0], flip_sin_to_cos=True, downscale_freq_shift=0)
-
+        # ---- 时间步编码 ----
+        # 将标量时间步 t 展开为正余弦向量，再映射为全局控制向量
+        self.time_proj = Timesteps(
+            num_channels=self.block_out_channels[0],
+            flip_sin_to_cos=True,
+            downscale_freq_shift=0,
+        )
         self.time_embedding = TimestepEmbedding(
-            in_channels=self.block_out_channels[0], 
-            time_embed_dim=time_embed_dim, 
-            act_fn="silu"
+            in_channels=self.block_out_channels[0],
+            time_embed_dim=time_embed_dim,
+            act_fn="silu",
         )
 
-        self.global_proj = nn.Linear(768, time_embed_dim)
+        # ---- 全局文本特征投影 ----
+        # 将 CLIP 全局特征映射到时间嵌入维度，叠加到 t_emb 上
+        self.global_text_proj = nn.Linear(cross_attention_dim, time_embed_dim)
 
-        # TODO: 下采样模块 (Down Blocks)
-        # 逐步降低空间分辨率，提取多层次特征
-        # self.down_blocks = nn.ModuleList([...])
+        # ---- 输入卷积 ----
+        self.conv_in = nn.Conv2d(
+            in_channels, block_out_channels[0], kernel_size=3, padding=1
+        )
 
-        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
-
+        # ---- 下采样模块 ----
+        # 逐步降低空间分辨率，提取多尺度特征
         self.down_blocks = nn.ModuleList([])
-
         output_channel = block_out_channels[0]
 
         for i, down_block_type in enumerate(down_block_types):
-
             input_channel = output_channel
-
             output_channel = block_out_channels[i]
-
             is_final_block = i == len(down_block_types) - 1
 
             down_block = get_down_block(
@@ -118,59 +128,52 @@ class UNet8Channel(nn.Module):
                 num_layers=layers_per_block,
                 in_channels=input_channel,
                 out_channels=output_channel,
-                temb_channels=time_embed_dim,       # 【关键】把 TODO 1 里的时间广播线接进来
-                add_downsample=not is_final_block,  # 是否缩小长宽
+                temb_channels=time_embed_dim,
+                add_downsample=not is_final_block,
                 resnet_eps=1e-5,
                 resnet_act_fn="silu",
                 resnet_groups=32,
-                cross_attention_dim=cross_attention_dim, # 【关键】文本翻译官的接口尺寸 (如 1024)
+                cross_attention_dim=cross_attention_dim,
                 num_attention_heads=attention_head_dim,
                 downsample_padding=1,
             )
-
             self.down_blocks.append(down_block)
 
-        # TODO: 中间层 (Mid Block)
-        # 在最低分辨率下进行更深层的特征提取
-        # self.mid_block = UNetMidBlock2DCrossAttn(...)
-
+        # ---- 中间模块 ----
+        # 在最低分辨率下进行深层特征融合
         self.mid_block = get_mid_block(
             mid_block_type="UNetMidBlock2DCrossAttn",
             in_channels=block_out_channels[-1],
-            temb_channels=time_embed_dim,           # 接上时间线
+            temb_channels=time_embed_dim,
             resnet_eps=1e-5,
             resnet_act_fn="silu",
             resnet_groups=32,
-            cross_attention_dim=cross_attention_dim, # 接上文本线
+            cross_attention_dim=cross_attention_dim,
             num_attention_heads=attention_head_dim,
         )
 
-        # TODO: 上采样模块 (Up Blocks)
-        # 逐步恢复空间分辨率，融合跳跃连接
-        # self.up_blocks = nn.ModuleList([...])
-
+        # ---- 上采样模块 ----
+        # 逐步恢复空间分辨率，通过跳跃连接融合下采样路径的低层特征
         self.up_blocks = nn.ModuleList([])
-        
-        # 上采样是倒着来的，所以要把通道数列表反转
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
-        
+
         for i, up_block_type in enumerate(up_block_types):
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
-            # 这里的 input_channel 包含了跳跃连接拼接过来的额外通道
-            input_channel = reversed_block_out_channels[min(i + 1, len(block_out_channels) - 1)]
-            
+            input_channel = reversed_block_out_channels[
+                min(i + 1, len(block_out_channels) - 1)
+            ]
             is_final_block = i == len(block_out_channels) - 1
 
             up_block = get_up_block(
                 up_block_type=up_block_type,
-                num_layers=layers_per_block + 1,    # 上采样层通常比下采样多一层 ResNet 用于消化拼接的特征
+                num_layers=layers_per_block + 1,
                 in_channels=input_channel,
                 out_channels=output_channel,
                 prev_output_channel=prev_output_channel,
                 temb_channels=time_embed_dim,
-                add_upsample=not is_final_block,    # 最后一层不需要再放大了
+                add_upsample=not is_final_block,
                 resnet_eps=1e-5,
                 resnet_act_fn="silu",
                 resnet_groups=32,
@@ -179,173 +182,174 @@ class UNet8Channel(nn.Module):
             )
             self.up_blocks.append(up_block)
 
-        # TODO: 输出层
+        # ---- 输出投影 ----
         # 将特征映射回 8 通道噪声空间
-        # self.conv_norm_out = nn.GroupNorm(...)
-        # self.conv_act = nn.SiLU()
-        # self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, 3, padding=1)
-
-        self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=32, eps=1e-5)
-        # 2. 扭曲（激活函数）
+        self.conv_norm_out = nn.GroupNorm(
+            num_channels=block_out_channels[0], num_groups=32, eps=1e-5
+        )
         self.conv_act = get_activation("silu")
-        # 3. 降维输出：从 320 压回 8 通道 (out_channels)
-        self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv2d(
+            block_out_channels[0], out_channels, kernel_size=3, padding=1
+        )
 
-        # 占位模块（框架代码，实际需要使用 diffusers 的 UNet2DConditionModel）
-        # self.placeholder_conv = nn.Conv2d(in_channels, out_channels, 1)
+    def loss(
+        self, noise_pred: torch.Tensor, noise: torch.Tensor
+    ) -> dict:
+        """
+        分通道计算 MSE 损失，DEM 通道权重大于 RGB 通道。
 
-    def loss(self, noise_pred: torch.Tensor, noise: torch.Tensor):
+        RGB（通道 0-3）与 DEM（通道 4-7）分别计算 MSE，最后加权求和。
+        DEM 损失权重 1.5×，以优先保证地形结构精度。
 
+        返回
+        -------
+        dict
+            ``loss``: 加权总损失；
+            ``loss_img``: RGB 通道 MSE；
+            ``loss_dem``: DEM 通道 MSE。
+        """
         img_noise_pred = noise_pred[:, :4, :, :]
         dem_noise_pred = noise_pred[:, 4:, :, :]
-
         img_noise = noise[:, :4, :, :]
         dem_noise = noise[:, 4:, :, :]
-        
+
         loss_img = F.mse_loss(img_noise_pred, img_noise)
         loss_dem = F.mse_loss(dem_noise_pred, dem_noise)
-        
         loss = loss_img + 1.5 * loss_dem
 
         return {
-            "loss_img": loss_img, 
+            "loss_img": loss_img,
             "loss_dem": loss_dem,
-            "loss": loss 
+            "loss": loss,
         }
 
     def forward(
         self,
         noisy_latent: torch.Tensor,
         timestep: torch.Tensor,
-        global_features: Optional[torch.Tensor] = None,
-        local_features: Optional[torch.Tensor] = None,
+        global_features: torch.Tensor,
+        local_features: torch.Tensor,
     ) -> torch.Tensor:
         """
-        前向传播（做题）
+        前向传播：预测给定时间步下添加到隐变量上的噪声。
 
-        Args:
-            noisy_latent: 带噪联合隐向量 [B, 8, 64, 64]
-            timestep: 时间步 [B]
-            global_features: 全局文本特征 [B, D_global]
-            local_features: 细节特征向量 [B, N, D_local]
+        参数
+        ----------
+        noisy_latent : Tensor
+            带噪联合隐向量 [B, 8, H, W]，通常 H=W=64。
+        timestep : Tensor
+            扩散时间步索引 [B]。
+        global_features : Tensor
+            CLIP 全局文本特征 [B, D]（pooled 输出）。
+        local_features : Tensor
+            CLIP 序列文本特征 [B, N, D]（hidden states）。
 
-        Returns:
-            noise_pred: 预测的噪声 [B, 8, 64, 64]
+        返回
+        -------
+        Tensor
+            预测的噪声 [B, 8, H, W]。
         """
-        # TODO: 完整的前向传播逻辑
-
-        # ==========================================
-        # 1. 翻译“时间”与“文本”指令
-        # ==========================================
-        # 将干瘪的标量 timestep 展开为正余弦波
+        # 1. 构建条件嵌入：时间 + 文本
         t_emb = self.time_proj(timestep)
-        # 统一数据类型 (防止 float16 和 float32 冲突)
         t_emb = t_emb.to(dtype=noisy_latent.dtype)
-        # 翻译成 U-Net 能听懂的全局控制向量
         t_emb = self.time_embedding(t_emb)
 
-        global_emb = self.global_proj(global_features)
+        global_emb = self.global_text_proj(global_features)
+        t_emb = t_emb + global_emb
 
-        t_emb += global_emb
-        
-        # 文本特征就是我们要传给 Cross-Attention 的 hidden_states
         encoder_hidden_states = local_features
 
-        # ==========================================
-        # 2. 进门安检 (Initial Convolution)
-        # ==========================================
-        # [B, 8, 64, 64] -> [B, 320, 64, 64]
+        # 2. 输入投影
         sample = self.conv_in(noisy_latent)
+        down_block_res_samples = (sample,)
 
-        # ==========================================
-        # 3. 压缩流水线 (Down Blocks)
-        # ==========================================
-        # 准备一个“堆栈”，用来存放要发送给右半边(Up Blocks)的高清特征
-        # 注意：进门后的第一个 sample 也要存进去！
-        down_block_res_samples = (sample,) 
-
-        for downsample_block in self.down_blocks:
-            # 必须严谨地检查当前 block 是不是 Cross-Attention 类型
-            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                sample, res_samples = downsample_block(
+        # 3. 下采样路径：逐层降维，收集跳跃连接
+        for ds_block in self.down_blocks:
+            if (
+                hasattr(ds_block, "has_cross_attention")
+                and ds_block.has_cross_attention
+            ):
+                sample, res_samples = ds_block(
                     hidden_states=sample,
                     temb=t_emb,
                     encoder_hidden_states=encoder_hidden_states,
                 )
             else:
-                sample, res_samples = downsample_block(hidden_states=sample, temb=t_emb)
-
-            # 把这一层产生的高清特征，追加到堆栈里
+                sample, res_samples = ds_block(
+                    hidden_states=sample, temb=t_emb
+                )
             down_block_res_samples += res_samples
 
-        # ==========================================
-        # 4. 决策谷底 (Mid Block)
-        # ==========================================
-        if hasattr(self.mid_block, "has_cross_attention") and self.mid_block.has_cross_attention:
+        # 4. 瓶颈层：最低分辨率下的深层特征处理
+        if (
+            hasattr(self.mid_block, "has_cross_attention")
+            and self.mid_block.has_cross_attention
+        ):
             sample = self.mid_block(
-                sample, 
-                t_emb, 
-                encoder_hidden_states=encoder_hidden_states
+                sample,
+                t_emb,
+                encoder_hidden_states=encoder_hidden_states,
             )
         else:
             sample = self.mid_block(sample, t_emb)
 
-        # ==========================================
-        # 5. 解压拼图流水线 (Up Blocks)
-        # ==========================================
-        for i, upsample_block in enumerate(self.up_blocks):
-            # 核心魔法：从堆栈的末尾（也就是最深层），精确地“切”下当前 Up Block 需要的跳跃特征
-            res_samples = down_block_res_samples[-len(upsample_block.resnets):]
-            # 把已经拿走的特征从堆栈里剔除
-            down_block_res_samples = down_block_res_samples[:-len(upsample_block.resnets)]
+        # 5. 上采样路径：逐步恢复分辨率，融入跳跃连接
+        for us_block in self.up_blocks:
+            res_samples = down_block_res_samples[
+                -len(us_block.resnets) :
+            ]
+            down_block_res_samples = down_block_res_samples[
+                : -len(us_block.resnets)
+            ]
 
-            if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                sample = upsample_block(
+            if (
+                hasattr(us_block, "has_cross_attention")
+                and us_block.has_cross_attention
+            ):
+                sample = us_block(
                     hidden_states=sample,
                     temb=t_emb,
-                    res_hidden_states_tuple=res_samples, # 把跳跃连接的特征塞进去融合！
+                    res_hidden_states_tuple=res_samples,
                     encoder_hidden_states=encoder_hidden_states,
                 )
             else:
-                sample = upsample_block(
+                sample = us_block(
                     hidden_states=sample,
                     temb=t_emb,
                     res_hidden_states_tuple=res_samples,
                 )
 
-        # ==========================================
-        # 6. 出口装配器 (Output Layer)
-        # ==========================================
+        # 6. 输出投影
         sample = self.conv_norm_out(sample)
         sample = self.conv_act(sample)
-        # [B, 320, 64, 64] -> [B, 8, 64, 64]
         noise_pred = self.conv_out(sample)
 
         return noise_pred
-        
-        """
-        # 框架代码：仅返回占位输出
-        batch_size = noisy_latent.shape[0]
-        noise_pred = self.placeholder_conv(noisy_latent)
 
-        return noise_pred
-        """
-        
 
 def build_unet(
     in_channels: int = 8,
     out_channels: int = 8,
+    cross_attention_dim: int = 768,
 ) -> UNet8Channel:
     """
-    构建 8 通道 U-Net 工厂函数
+    ``UNet8Channel`` 工厂函数。
 
-    Args:
-        in_channels: 输入通道数（固定为 8）
-        out_channels: 输出通道数（固定为 8）
-    Returns:
-        unet: 8 通道 U-Net 模型
+    参数
+    ----------
+    in_channels : int
+        输入通道数，默认 8。
+    out_channels : int
+        输出通道数，默认 8。
+    cross_attention_dim : int
+        文本编码器的特征维度（默认 768，与 CLIP ViT-L/14 一致）。
+
+    返回
+    -------
+    UNet8Channel
     """
     return UNet8Channel(
         in_channels=in_channels,
         out_channels=out_channels,
+        cross_attention_dim=cross_attention_dim,
     )
