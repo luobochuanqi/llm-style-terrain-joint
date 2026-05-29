@@ -58,14 +58,14 @@ OUTPUT_DIR = "./outputs/unet_8ch"
 
 EPOCHS = 50
 BATCH_SIZE = 4
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 1e-5
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 4
 USE_AMP = True
 VAL_SPLIT = 0.05  # 验证集比例
 SEED = 42
 USE_CFGE = 0.1  # 使用无分类引导的概率
-GUIDANCE_SCALE = 4
+GUIDANCE_SCALE = 5.5
 
 SAVE_STEPS = 12000
 LOG_STEPS = 10
@@ -413,7 +413,7 @@ class UNetTrainer:
         fig = plt.figure(figsize=(22, 10))
         fig.suptitle(f"U-Net 8-Ch Dashboard — Epoch {epoch}\nPrompt: '{prompt}'", fontsize=16, fontweight="bold")
 
-        ax1 = fig.add_subplot(2, 4, (1, 3))
+        ax1 = fig.add_subplot(2, 4, 1)
         ax1.plot(epochs, losses_total, "b-", linewidth=1.5, marker='o')
         ax1.set_title("Total Loss")
         ax1.grid(True, alpha=0.3)
@@ -458,7 +458,7 @@ class UNetTrainer:
         ax8.set_title("[AI] Generated DEM", color='darkgreen', fontweight='bold')
         ax8.axis('off')
 
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
         fig.savefig(self.viz_output_dir / f"dashboard_epoch_{epoch:04d}.png", dpi=120)
         plt.close(fig)
 
@@ -472,10 +472,14 @@ class UNetTrainer:
             avg_loss = self.train_epoch(epoch)
             print(f"\nEpoch {epoch:3d} | Loss: {avg_loss['loss']:.4f} | Img: {avg_loss['img']:.4f} | Dem: {avg_loss['dem']:.4f}")
             
+            trainable_state_dict = {
+                name: param for name, param in self.unet.named_parameters() if param.requires_grad
+            }
+
             torch.save({
                 "epoch": epoch, 
                 "global_step": self.global_step, 
-                "model_state_dict": self.unet.state_dict(),
+                "model_state_dict": trainable_state_dict,
                 "optimizer_state_dict": self.optimizer.state_dict(), 
                 "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
                 "scheduler_state_dict": self.lr_scheduler.state_dict(),
@@ -485,8 +489,15 @@ class UNetTrainer:
             
             if avg_loss["loss"] < self.best_loss:
                 self.best_loss = avg_loss["loss"]
-                torch.save({"epoch": epoch, "model_state_dict": self.unet.state_dict()}, self.output_dir / "best_unet.pt")
+                torch.save({"epoch": epoch, "model_state_dict": trainable_state_dict}, self.output_dir / "best_unet.pt")
             
+            if epoch % 5 == 0:
+
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": trainable_state_dict
+                }, self.output_dir / f"checkpoint_epoch_{epoch:04d}.pt")
+
             self.loss_history.append((epoch, avg_loss["loss"], avg_loss["img"], avg_loss["dem"]))
             if epoch % self.args.viz_interval == 0 or epoch == self.args.epochs - 1:
                 self.visualize_epoch(epoch)
@@ -558,7 +569,7 @@ class UNetTrainer:
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.unet.load_state_dict(checkpoint["model_state_dict"])
+        self.unet.load_state_dict(checkpoint["model_state_dict"], strict=False)
         if "optimizer_state_dict" in checkpoint and self.args.mode == "train":
             try:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -579,7 +590,7 @@ class UNetTrainer:
             self.loss_history = checkpoint.get("loss_history", [])
             print(f"成功恢复训练状态！将从 Epoch {self.start_epoch} 继续。")
         else:
-            print("成功加载推理权重！")
+            print("成功加载权重！")
 
 
 def main():
