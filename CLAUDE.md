@@ -112,3 +112,11 @@ Sobel/Laplacian kernels are registered as non-persistent buffers.
 - Config is hardcoded in scripts — no config files exist. README references a `configs/` directory that does not exist.
 - Docstrings are in Chinese; keep comments Chinese when modifying existing Chinese files.
 - The VAE's static normalization (`x / 3000.0`) differs from the data pipeline's log-transform normalization. The static `/3000` is used only when `norm_params.json` is absent.
+
+## DiT-specific gotchas
+
+- **`time_embed_dim` must equal `hidden_size`** (1152), NOT `hidden_size * 4`. The 4x expansion made `adaLN_modulation` a 4608→10368 Linear per block (~48M x 28 = 1.3B params), bloating the model to ~1.96B.
+- **Pretrained loading uses `PixArtTransformer2DModel`** from diffusers. `nn.MultiheadAttention.in_proj_weight` requires concatenating PixArt's separate `to_q`/`to_k`/`to_v` weights.
+- **adaLN modulation and pos_embed are randomly initialized** — PixArt uses shared `adaln_single` while our DiTBlock uses per-block modulation, so these can't be loaded from pretrained.
+- **`train_pipeline.py` attribute `self.unet`** holds either UNet or DiT — intentionally reused for code compatibility.
+- **DiT staged training**: Stage 1 (burn-in, epochs 0-9) freezes backbone, trains only `global_text_proj` + `local_text_proj` at 10x lr. Stage 2 unfreezes all.
