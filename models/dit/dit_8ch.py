@@ -306,6 +306,139 @@ class DiT8Channel(nn.Module):
         tokens = tokens.view(B, out_channels, latent_size, latent_size)
         return tokens
 
+    def load_pretrained(self, pretrained_path: str) -> None:
+        """Load pretrained weights from PixArt-alpha XL.
+
+        Handles structural differences between our nn.MultiheadAttention
+        (merged qkv weights) and diffusers' Attention class (separate q/k/v
+        weights). Also handles channel expansion for patch_embed
+        (4-channel pretrained -> 8-channel ours).
+
+        Intentionally skipped (random init):
+          - pos_embed (PixArt has no separate pos_embed parameter)
+          - global_text_proj (PixArt has no separate global text path)
+          - local_text_proj (PixArt uses T5 4096-dim, ours uses CLIP 768-dim)
+          - adaLN_modulation.1 (PixArt uses shared adaln-single, ours is per-block)
+        """
+        from diffusers import PixArtTransformer2DModel
+
+        pretrained = PixArtTransformer2DModel.from_pretrained(
+            pretrained_path,
+            torch_dtype=torch.float32,
+        )
+        px_state = pretrained.state_dict()
+        own_state = self.state_dict()
+
+        loaded, skipped, expanded = 0, 0, 0
+
+        # ---- Top-level direct copies (same shape, different path) ----
+
+        # Time embedding
+        for suffix in ("linear_1.weight", "linear_1.bias", "linear_2.weight", "linear_2.bias"):
+            px_key = f"adaln_single.emb.timestep_embedder.{suffix}"
+            our_key = f"time_embedding.{suffix}"
+            if px_key in px_state and own_state[our_key].shape == px_state[px_key].shape:
+                own_state[our_key].copy_(px_state[px_key])
+                loaded += 1
+
+        # Final output (same shape: [32, 1152] and [32] for 8ch * 4patch)
+        for suffix in ("proj_out.weight", "proj_out.bias"):
+            our_key = suffix.replace("proj_out.", "final_linear.")
+            px_key = suffix
+            if px_key in px_state and own_state[our_key].shape == px_state[px_key].shape:
+                own_state[our_key].copy_(px_state[px_key])
+                loaded += 1
+
+        # Patch embedding bias (same shape: [1152])
+        if "pos_embed.proj.bias" in px_state:
+            own_state["patch_embed.bias"].copy_(px_state["pos_embed.proj.bias"])
+            loaded += 1
+
+        # Patch embedding weight: 4ch -> 8ch expansion
+        if "pos_embed.proj.weight" in px_state:
+            px_w = px_state["pos_embed.proj.weight"]  # [1152, 4, 2, 2]
+            own_state["patch_embed.weight"].copy_(
+                torch.cat([px_w, torch.zeros_like(px_w)], dim=1)  # [1152, 8, 2, 2]
+            )
+            expanded += 1
+
+        # ---- Block-level transfers ----
+
+        for i in range(self.depth):
+            px_prefix = f"transformer_blocks.{i}"
+            our_prefix = f"transformer_blocks.{i}"
+
+            # Self-attention qkv: merge PixArt separate q/k/v into in_proj
+            self._merge_qkv(
+                px_state, own_state,
+                f"{px_prefix}.attn1",
+                f"{our_prefix}.self_attn",
+            )
+            loaded += 2  # weight + bias
+
+            # Self-attention output projection
+            for param_name in ("out_proj.weight", "out_proj.bias"):
+                our_key = f"{our_prefix}.self_attn.{param_name}"
+                suffix = param_name.split(".", 1)[1]
+                px_key = f"{px_prefix}.attn1.to_out.0.{suffix}"
+                if px_key in px_state and own_state[our_key].shape == px_state[px_key].shape:
+                    own_state[our_key].copy_(px_state[px_key])
+                    loaded += 1
+
+            # Cross-attention qkv
+            self._merge_qkv(
+                px_state, own_state,
+                f"{px_prefix}.attn2",
+                f"{our_prefix}.cross_attn",
+            )
+            loaded += 2
+
+            # Cross-attention output projection
+            for param_name in ("out_proj.weight", "out_proj.bias"):
+                our_key = f"{our_prefix}.cross_attn.{param_name}"
+                suffix = param_name.split(".", 1)[1]
+                px_key = f"{px_prefix}.attn2.to_out.0.{suffix}"
+                if px_key in px_state and own_state[our_key].shape == px_state[px_key].shape:
+                    own_state[our_key].copy_(px_state[px_key])
+                    loaded += 1
+
+            # FFN: PixArt ff.net.0.proj -> our ffn.0, PixArt ff.net.2 -> our ffn.2
+            ffn_map = {
+                (f"{our_prefix}.ffn.0.weight", f"{px_prefix}.ff.net.0.proj.weight"),
+                (f"{our_prefix}.ffn.0.bias", f"{px_prefix}.ff.net.0.proj.bias"),
+                (f"{our_prefix}.ffn.2.weight", f"{px_prefix}.ff.net.2.weight"),
+                (f"{our_prefix}.ffn.2.bias", f"{px_prefix}.ff.net.2.bias"),
+            }
+            for our_key, px_key in ffn_map:
+                if px_key in px_state and own_state[our_key].shape == px_state[px_key].shape:
+                    own_state[our_key].copy_(px_state[px_key])
+                    loaded += 1
+
+        del pretrained, px_state
+        print(
+            f"Pretrained weights loaded: {loaded} exact matches, "
+            f"{expanded} expanded (channel dim), "
+            f"{skipped} skipped (random init)"
+        )
+
+    def _merge_qkv(
+        self,
+        px_state: dict,
+        own_state: dict,
+        px_attn: str,
+        our_attn: str,
+    ) -> None:
+        """Merge PixArt separate q/k/v weights into nn.MultiheadAttention's
+        merged in_proj_weight (dim=0 concatenation: [q, k, v]).
+        """
+        for param_type in ("weight", "bias"):
+            q = px_state.get(f"{px_attn}.to_q.{param_type}")
+            k = px_state.get(f"{px_attn}.to_k.{param_type}")
+            v = px_state.get(f"{px_attn}.to_v.{param_type}")
+            our_key = f"{our_attn}.in_proj_{param_type}"
+            if q is not None and k is not None and v is not None:
+                own_state[our_key].copy_(torch.cat([q, k, v], dim=0))
+
     def loss(
         self, noise_pred: torch.Tensor, noise: torch.Tensor
     ) -> dict:
