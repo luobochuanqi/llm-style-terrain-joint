@@ -88,7 +88,7 @@ def process_folder(input_dir, output_dir, mode="dem", file_ext=".png", params=No
             success_count += 1
             
         except Exception as e:
-            tqdm.write(f"❌ 处理文件 {basename} 失败: {e}")
+            tqdm.write(f"处理文件 {basename} 失败: {e}")
             
     print(f"{mode.upper()} 转换完成！成功保存 {success_count} 个 NPY 文件到 {output_dir}\n")
 

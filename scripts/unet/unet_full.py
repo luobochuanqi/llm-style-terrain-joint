@@ -64,8 +64,8 @@ NUM_WORKERS = 4
 USE_AMP = True
 VAL_SPLIT = 0.05  # 验证集比例
 SEED = 42
-USE_CFGE = 0.1  # 使用无分类引导的概率
-GUIDANCE_SCALE = 5.5
+USE_CFGE = 0.2  # 使用无分类引导的概率
+GUIDANCE_SCALE = 4 # 1代表完全原始的输出
 
 SAVE_STEPS = 12000
 LOG_STEPS = 10
@@ -253,7 +253,7 @@ class UNetTrainer:
 
             cfged_prompts = []
             for p in prompts:
-                if random.random() < USE_CFGE:  # 10% 概率使用无条件
+                if random.random() < USE_CFGE: 
                     cfged_prompts.append("")
                 else:
                     cfged_prompts.append(p)
@@ -296,8 +296,8 @@ class UNetTrainer:
                 loss_img_batch = loss_img_none.mean(dim=[1, 2, 3])
                 loss_dem_batch = loss_dem_none.mean(dim=[1, 2, 3])
                 
-                # 按你的设定，依然使用 1.5 的高程权重
-                loss_batch = loss_img_batch + loss_dem_batch * 1.5
+                
+                loss_batch = loss_img_batch + loss_dem_batch
                 
                 # ==========================================================
                 # [新增] 3. 应用权重并得出最终 Loss

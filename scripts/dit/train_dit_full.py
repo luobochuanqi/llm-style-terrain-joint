@@ -44,19 +44,23 @@ from train.train_pipeline import UNetTrainingPipeline, test_noise_prediction
 # =============================================================================
 
 _DEFAULT_DATA_ROOT = "./data/unet_training"
-_DEFAULT_DEM_VAE_CKPT = ""
+_DEFAULT_DEM_VAE_CKPT = "./data/vae_model_data/best_checkpoint.pt"
 _DEFAULT_DIT_PRETRAINED = "PixArt-alpha/PixArt-XL-2-1024-MS"
 _DEFAULT_OUTPUT_DIR = "./outputs/dit_8ch"
 _DEFAULT_EPOCHS = 50
 _DEFAULT_BATCH_SIZE = 2
-_DEFAULT_LEARNING_RATE = 1e-4
+_DEFAULT_LEARNING_RATE = 5e-5
 _DEFAULT_WEIGHT_DECAY = 1e-4
 _DEFAULT_NUM_WORKERS = 2
 _DEFAULT_USE_AMP = True
-_DEFAULT_SAVE_STEPS = 1000
+_DEFAULT_SAVE_STEPS = 5000
 _DEFAULT_VIZ_INTERVAL = 1
 _DEFAULT_WARMUP_EPOCHS = 5
 _DEFAULT_STAGE1_EPOCHS = 10
+
+_DEFAULT_CFG_DROP_RATE = 0.1
+_DEFAULT_MIN_SNR_GAMMA = 5.0
+_DEFAULT_GUIDANCE_SCALE = 4.0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -85,6 +89,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="运行模式")
     parser.add_argument("--stage1_epochs", type=int, default=_DEFAULT_STAGE1_EPOCHS,
                         help="Stage 1 burn-in epoch 数（仅训练适配层）")
+
+    parser.add_argument("--cfg_drop_rate", type=float, default=_DEFAULT_CFG_DROP_RATE,
+                        help="无分类器引导(CFG)的条件丢弃概率 (默认 0.1)")
+    parser.add_argument("--min_snr_gamma", type=float, default=_DEFAULT_MIN_SNR_GAMMA,
+                        help="Min-SNR 加权策略的截断阈值 (默认 5.0，设为 0 关闭)")
 
     return parser
 
@@ -172,6 +181,9 @@ def main():
         pipeline = UNetTrainingPipeline(args)
         pipeline.load_checkpoint(args.checkpoint)
         test_noise_prediction(pipeline)
+
+        pipeline.generate_validation_samples(epoch_or_name="test_inference", guidance_scale=_DEFAULT_GUIDANCE_SCALE)
+
         return
 
     # --- Train mode ---
