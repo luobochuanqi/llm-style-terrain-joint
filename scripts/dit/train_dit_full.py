@@ -102,7 +102,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--split", type=float, default = _DEFAULT_SPLIT)
 
-    parser.add_argument("num_sample", type=int, default = _DEFAULT_NUM_SAMPLES)
+    parser.add_argument("--num_sample", type=int, default = _DEFAULT_NUM_SAMPLES)
 
     return parser
 

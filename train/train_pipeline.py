@@ -226,7 +226,7 @@ class UNetTrainingPipeline:
         
         total_size = len(metadata)
 
-        val_size = min(1, int(self.split * total_size))
+        val_size = max(1, int(self.split * total_size))
         train_size = total_size - val_size
 
         generator = torch.Generator().manual_seed(self.seed)
@@ -239,7 +239,7 @@ class UNetTrainingPipeline:
 
         self.train_dataloader = DataLoader(
             train_dataset,
-            batch_size=self.args.bathc_size,
+            batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.num_workers,
             pin_memory=True,
@@ -248,7 +248,7 @@ class UNetTrainingPipeline:
 
         self.val_dataloader = DataLoader(
             val_dataset,
-            batch_size=self.args.bathc_size,
+            batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.num_workers,
             pin_memory=True,
@@ -613,7 +613,7 @@ class UNetTrainingPipeline:
     def generate_validation_samples(
         self, 
         epoch_or_name: str | int = "test_mode", 
-        guidance_scale: float = 5.5, 
+        guidance_scale: float = 4, 
         num_inference_steps: int = 50,
         num_samples: int = 4  # <-- 新增参数，控制生成总数
     ) -> None:
@@ -699,7 +699,7 @@ class UNetTrainingPipeline:
                 gen_rgb_np = rgb_imgs[i].permute(1, 2, 0).cpu().numpy()
                 rgb_save_array = (gen_rgb_np * 255).astype(np.uint8)
                 
-                # 还原 DEM 到真实海拔物理值
+                # 还原 DEM 
                 gen_dem_np = dem_imgs[i][0].cpu().numpy()
                 h_real = np.exp(gen_dem_np * (max_log - min_log) + min_log) + p_low - 1
                 dem_save_array = np.round(np.clip(h_real, 0, 65535)).astype(np.uint16)
@@ -711,6 +711,12 @@ class UNetTrainingPipeline:
         
                 Image.fromarray(dem_save_array).save(out_dem_path)
                 Image.fromarray(rgb_save_array).save(out_rgb_path)
+
+                prompt_path = os.path.join(self.viz_output_dir, basename)
+
+                prompt_file = Path(prompt_path)
+
+                prompt_file.write_text(prompts[i], encoding='utf_8')
                 
                 count += 1  # <-- 致命修复：成功保存一张，计数器加 1
 
@@ -792,7 +798,7 @@ class UNetTrainingPipeline:
             )
 
             # 验证 loss（不参与训练，仅观察趋势）
-            val_loss = self.compute_validation_loss()
+            val_loss = self.loss_dict
             tqdm.write(
                 f"       验证 | "
                 f"Total: {val_loss['loss']:.4f} | "
