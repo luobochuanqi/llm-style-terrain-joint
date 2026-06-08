@@ -1,20 +1,10 @@
 """
-8 通道 U-Net 训练脚本（效果优先版）
+8 通道 U-Net 训练脚本 — 暂时弃用
 
-基于 DDPM 的纹理 + 高程联合去噪训练。CLIP 文本编码、VAE 隐空间映射、
-训练流水线均已拆分到对应模块（models/clip/、train/），本脚本仅为入口。
+本脚本依赖的 train/train_pipeline.py 已搁置，无法运行。
+U-Net 训练请直接使用: python scripts/unet/unet_full.py --mode train --epochs 50
 
-用法：
-    # 全新训练
-    python scripts/unet/train_unet_full.py --epochs 50
-
-    # 断点续训
-    python scripts/unet/train_unet_full.py --epochs 100 --checkpoint ./outputs/unet_8ch/checkpoint.pt
-
-    # 测试噪声预测精度
-    python scripts/unet/train_unet_full.py --mode test --checkpoint ./outputs/unet_8ch/checkpoint.pt
-
-数据目录结构：
+数据目录结构（供参考）：
     data_root/
       ├── rgb/      # RGB 纹理图 (.png / .jpg)
       ├── dem/      # DEM 高度图 (.npy / .png / .tif)

@@ -1,15 +1,17 @@
 """
 8通道 U-Net 模型 —— 纹理与高程联合扩散
 
-本模块实现文本条件的 8 通道 U-Net，用于高度图 + 纹理的隐空间联合生成。
+本模块实现文本条件的 8 通道 U-Net，用于纹理 + 高度图的隐空间联合生成。
 文本条件通过两条路径注入：
 
     1. 全局特征（CLIP pooled 输出）经线性投影后叠加到时间步嵌入上，统一调制所有残差块。
+       注意：当前 SD UNet2DConditionModel 训练中 global_features 路径暂未启用，
+       仅使用 cross-attention（local_features）。本模块的 global_text_proj 仅保留接口。
     2. 序列级特征（CLIP hidden states）作为 encoder_hidden_states 传入交叉注意力层，
-       实现空间感知的条件控制。
+        实现空间感知的条件控制。
 
 结构概览：
-    输入  [B, 8, 64, 64]   (4 通道高度 + 4 通道纹理)
+    输入  [B, 8, 64, 64]   (4 通道纹理 + 4 通道高度)
       conv_in  →  [B, 320, 64, 64]
       Down blocks (3×CrossAttn + 1×Down)  →  多层特征
       Mid block (CrossAttn)                →  瓶颈
@@ -39,7 +41,7 @@ class UNet8Channel(nn.Module):
     参数
     ----------
     in_channels : int
-        输入通道数，默认 8。
+        输入通道数，默认 8（ch 0-3 纹理 + ch 4-7 高度）。
     out_channels : int
         输出通道数，默认 8。
     down_block_types : tuple of str

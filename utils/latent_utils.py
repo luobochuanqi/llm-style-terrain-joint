@@ -1,12 +1,15 @@
 """
 联合隐空间管理工具
 
-根据 roadmap 描述：
-- 纹理隐向量：4x64x64（SD VAE 压缩）
-- 高度隐向量：4x64x64（魔改 VAE 压缩）
-- 联合隐向量 z_0：8x64x64（torch.cat 拼接）
+8 通道布局（与实际训练代码一致）：
+- ch 0-3：纹理隐向量 4×64×64（SD VAE 压缩，scaling_factor=0.18215）
+- ch 4-7：高度隐向量 4×64×64（HeightMapVAE 压缩，scaling_factor=1.0）
+- 联合隐向量 z_0：8×64×64（torch.cat 拼接）
 
-本模块提供隐向量的拼接、拆分、加噪、去噪等工具函数
+本模块提供隐向量的拼接、拆分、加噪、去噪等工具函数。
+
+注意：DDIMScheduler 为骨架（set_timesteps/step 未实现）。
+     当前推理使用 diffusers 原生 DDIMScheduler（见 scripts/unet/unet_full.py）。
 """
 
 import torch
@@ -44,9 +47,9 @@ def split_joint_latent(
         height_latent: 高度隐向量 [B, 4, 64, 64]
         texture_latent: 纹理隐向量 [B, 4, 64, 64]
     """
-    # 从中间劈开
-    height_latent = joint_latent[:, :4, :, :]  # 前 4 通道
-    texture_latent = joint_latent[:, 4:, :, :]  # 后 4 通道
+    # ch 0-3：纹理，ch 4-7：高度
+    texture_latent = joint_latent[:, :4, :, :]
+    height_latent = joint_latent[:, 4:, :, :]
     return height_latent, texture_latent
 
 

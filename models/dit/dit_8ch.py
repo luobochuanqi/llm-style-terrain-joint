@@ -89,6 +89,9 @@ class DiTBlock(nn.Module):
             nn.Linear(time_embed_dim, 9 * hidden_size),
         )
 
+        nn.init.zeros_(self.adaLN_modulation[1].weight)
+        nn.init.zeros_(self.adaLN_modulation[1].bias)
+
         # Self-Attention (pre-norm)
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
         self.self_attn = nn.MultiheadAttention(
@@ -148,25 +151,25 @@ class DiTBlock(nn.Module):
         def _b(b_tensor):
             return b_tensor.unsqueeze(1)
 
-        # 2. Self-Attention
+       # 2. Self-Attention (修正：gate 移到最后)
         normed = self.norm1(hidden_states)
-        normed = _b(gate1) * (normed * (1 + _b(scale1)) + _b(shift1))
-        attn_out, _ = self.self_attn(normed, normed, normed, need_weights=False)
-        hidden_states = hidden_states + attn_out
+        attn_in = normed * (1 + _b(scale1)) + _b(shift1)
+        attn_out, _ = self.self_attn(attn_in, attn_in, attn_in, need_weights=False)
+        hidden_states = hidden_states + _b(gate1) * attn_out
 
-        # 3. Cross-Attention
+        # 3. Cross-Attention (修正：gate 移到最后)
         normed = self.norm2(hidden_states)
-        normed = _b(gate2) * (normed * (1 + _b(scale2)) + _b(shift2))
+        cross_in = normed * (1 + _b(scale2)) + _b(shift2)
         cross_out, _ = self.cross_attn(
-            normed, encoder_hidden_states, encoder_hidden_states, need_weights=False
+            cross_in, encoder_hidden_states, encoder_hidden_states, need_weights=False
         )
-        hidden_states = hidden_states + cross_out
+        hidden_states = hidden_states + _b(gate2) * cross_out
 
-        # 4. FFN
+        # 4. FFN (修正：gate 移到最后)
         normed = self.norm3(hidden_states)
-        normed = _b(gate3) * (normed * (1 + _b(scale3)) + _b(shift3))
-        ffn_out = self.ffn(normed)
-        hidden_states = hidden_states + ffn_out
+        ffn_in = normed * (1 + _b(scale3)) + _b(shift3)
+        ffn_out = self.ffn(ffn_in)
+        hidden_states = hidden_states + _b(gate3) * ffn_out
 
         return hidden_states
 
@@ -374,6 +377,7 @@ class DiT8Channel(nn.Module):
 
         pretrained = PixArtTransformer2DModel.from_pretrained(
             pretrained_path,
+            subfolder="transformer",
             torch_dtype=torch.float32,
         )
         px_state = pretrained.state_dict()
@@ -510,7 +514,7 @@ class DiT8Channel(nn.Module):
 
         loss_img = F.mse_loss(img_noise_pred, img_noise)
         loss_dem = F.mse_loss(dem_noise_pred, dem_noise)
-        loss = loss_img + 1.5 * loss_dem
+        loss = loss_img + loss_dem
 
         return {
             "loss_img": loss_img,

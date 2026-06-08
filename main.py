@@ -1,7 +1,10 @@
 """
 LLM 风格地形生成联合模型
 
-主入口文件
+主入口文件 — 暂时弃用
+
+U-Net 训练请直接使用: python scripts/unet/unet_full.py --mode train --epochs 50
+DiT 训练请直接使用: python scripts/dit/train_dit_full.py（待重构）
 """
 
 import torch
