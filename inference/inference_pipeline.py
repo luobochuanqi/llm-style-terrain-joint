@@ -124,6 +124,13 @@ class InferencePipeline:
             z_t_minus_1: 去噪后的隐向量 [1, 8, 64, 64]
         """
         # TODO: 实现 DDIM 采样器的一步去噪
+        # 注意：unet forward 接口取决于使用的模型类型：
+        #   - models/unet/unet_8ch.py build_unet:
+        #       unet(noisy_latent=..., timestep=..., global_features=..., local_features=...)
+        #       返回 Tensor
+        #   - scripts/unet/unet_full.py 的 SD1.5 UNet2DConditionModel:
+        #       unet(sample=..., timestep=..., encoder_hidden_states=...)
+        #       返回 UNet2DConditionOutput，噪声预测通过 .sample 属性获取
         # 1. U-Net 预测噪声
         # noise_pred = self.unet(z_t, t, global_features, local_features)
         # 2. 根据 DDIM 公式计算 z_{t-1}

@@ -73,6 +73,19 @@ VIZ_INTERVAL = 1
 
 
 def build_8ch_unet_from_sd(device="cuda"):
+    """从 SD1.5 UNet 构建 8 通道联合去噪模型。
+
+    前 4 通道载入 SD 预训练权重，后 4 通道（DEM）用 randn 小系数初始化。
+    采用阶梯式解冻：conv_in/conv_out + 注意力层 + 浅层 encoder/decoder 解冻。
+
+    Forward 接口：
+        model(sample=noisy_latent, timestep=timesteps,
+              encoder_hidden_states=local_features) → UNet2DConditionOutput
+        噪声预测通过 output.sample 属性获取。
+
+    注意：此接口与 models/unet/unet_8ch.py 的 build_unet 不同
+    （build_unet 额外接受 global_features 参数，且直接返回 Tensor）。
+    """
     print("正在加载 SD 的 U-Net 模型...")
     unet = UNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
 
@@ -223,8 +236,7 @@ class UNetTrainer:
     def encode_to_latent(self, rgb_pixels, dem_pixels):
         rgb_latent = self.rgb_vae.encode(rgb_pixels).latent_dist.sample() * 0.18215
         if self.dem_vae is not None:
-            raw_dem_latent = self.dem_vae.encode(dem_pixels).latent_dist.sample()
-            dem_latent = raw_dem_latent * 0.993099
+            dem_latent = self.dem_vae.encode(dem_pixels).latent_dist.sample()
         else:
             dem_pixels_3ch = dem_pixels.repeat(1, 3, 1, 1)
             dem_latent = self.rgb_vae.encode(dem_pixels_3ch).latent_dist.sample() * 0.18215
@@ -389,10 +401,6 @@ class UNetTrainer:
         rgb_latent, dem_latent = torch.chunk(latents, 2, dim=1)
         rgb_latent = rgb_latent / 0.18215
         
-        # [核心修复 3]：解包时的极致对称逆运算
-        dem_latent = dem_latent / 0.993099
-        
-        
         rgb_image = self.rgb_vae.decode(rgb_latent).sample
         dem_image = self.dem_vae.decode(dem_latent).sample.clamp(0, 1) if self.dem_vae else self.rgb_vae.decode(dem_latent).sample.clamp(-1, 1) / 2 + 0.5
         rgb_image = (rgb_image / 2 + 0.5).clamp(0, 1)
@@ -519,67 +527,61 @@ class UNetTrainer:
 
         p_low, min_log, max_log = self.norm_params["p_low"], self.norm_params["min_log"], self.norm_params["max_log"]
 
-        for i in range(5):
+        count = 0
+        for batch in self.val_dataloader:
+            if count >= num_samples:
+                break
 
-            print(f"正在进行第{i}次推理\n")
-            
-            count = 0
-            for batch in self.val_dataloader:
-                if count >= num_samples: break
+            prompt = batch["prompt"][0]
+            basename = batch["basename"][0]
+            print(f"正在生成 {count+1}/{num_samples}: {basename} | Prompt: {prompt}")
 
-                prompt = batch["prompt"][0]
-                basename = batch["basename"][0]
-                print(f"正在生成 {count+1}/{num_samples}: {basename} | Prompt: {prompt}")
+            guidance_scale = GUIDANCE_SCALE
 
-                guidance_scale = GUIDANCE_SCALE
+            _, uncond_local_features = self.text_encoder([""])
+            _, cond_local_features = self.text_encoder([prompt])
+            local_features = torch.cat([uncond_local_features, cond_local_features])
 
-                _, uncond_local_features = self.text_encoder([""])
-                _, cond_local_features = self.text_encoder([prompt])
-                local_features = torch.cat([uncond_local_features, cond_local_features])
+            latents = torch.randn((1, 8, 64, 64), device=self.device)
 
-                latents = torch.randn((1, 8, 64, 64), device=self.device)
+            self.infer_scheduler.set_timesteps(50)
 
-                # 注意：你的原代码 test 里写的是 noise_scheduler，但你初始化的是 infer_scheduler
-                self.infer_scheduler.set_timesteps(50)
+            for t in tqdm(self.infer_scheduler.timesteps, desc="Sampling", leave=False):
+                latent_model_input = torch.cat([latents] * 2)
 
-                for t in tqdm(self.infer_scheduler.timesteps, desc="Sampling", leave=False):
-                    latent_model_input = torch.cat([latents] * 2)
+                output = self.unet(
+                    sample=latent_model_input, 
+                    timestep=t.unsqueeze(0).to(self.device), 
+                    encoder_hidden_states=local_features
+                )
 
-                    output = self.unet(
-                        sample=latent_model_input, 
-                        timestep=t.unsqueeze(0).to(self.device), 
-                        encoder_hidden_states=local_features
-                    )
+                noise_pred_uncond, noise_pred_text = output.sample.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                    noise_pred_uncond, noise_pred_text = output.sample.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                latents = self.infer_scheduler.step(noise_pred, t, latents).prev_sample
 
-                    latents = self.infer_scheduler.step(noise_pred, t, latents).prev_sample
+            rgb_latent, dem_latent = torch.chunk(latents, 2, dim=1)
+            rgb_latent = rgb_latent / 0.18215
 
-                rgb_latent, dem_latent = torch.chunk(latents, 2, dim=1)
-                rgb_latent, dem_latent = rgb_latent / 0.18215, dem_latent / 0.993099
-                # dem_latent = (dem_latent * self.dem_latent_std) + self.dem_latent_mean
+            rgb_image = self.rgb_vae.decode(rgb_latent).sample
+            dem_image = self.dem_vae.decode(dem_latent).sample.clamp(0, 1) if self.dem_vae else self.rgb_vae.decode(dem_latent).sample.clamp(-1, 1) / 2 + 0.5
 
+            gen_rgb_np = (rgb_image / 2 + 0.5).clamp(0, 1)[0].permute(1, 2, 0).cpu().numpy()
+            gen_dem_np = dem_image[0][0].cpu().numpy()
 
-                rgb_image = self.rgb_vae.decode(rgb_latent).sample
-                dem_image = self.dem_vae.decode(dem_latent).sample.clamp(0, 1) if self.dem_vae else self.rgb_vae.decode(dem_latent).sample.clamp(-1, 1) / 2 + 0.5
+            h_real = np.exp(gen_dem_np * (max_log - min_log) + min_log) + p_low - 1
+            dem_save_array = np.round(np.clip(h_real, 0, 65535)).astype(np.uint16)
+            rgb_save_array = (gen_rgb_np * 255).astype(np.uint8)
 
-                gen_rgb_np = (rgb_image / 2 + 0.5).clamp(0, 1)[0].permute(1, 2, 0).cpu().numpy()
-                gen_dem_np = dem_image[0][0].cpu().numpy()
-
-                h_real = np.exp(gen_dem_np * (max_log - min_log) + min_log) + p_low - 1
-                dem_save_array = np.round(np.clip(h_real, 0, 65535)).astype(np.uint16)
-                rgb_save_array = (gen_rgb_np * 255).astype(np.uint8)
-
-                Image.fromarray(rgb_save_array).save(test_dir / f"{basename}_{i}_gen_texture.png")
-                Image.fromarray(dem_save_array, mode='I;16').save(test_dir / f"{basename}_{i}_gen_heightmap.png")
-                count += 1
+            Image.fromarray(rgb_save_array).save(test_dir / f"{basename}_gen_texture.png")
+            Image.fromarray(dem_save_array, mode='I;16').save(test_dir / f"{basename}_gen_heightmap.png")
+            count += 1
             
         print(f"\n测试完成! 生成的模型资产已保存至: {test_dir}")
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.unet.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        self.unet.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
         # print()
 
