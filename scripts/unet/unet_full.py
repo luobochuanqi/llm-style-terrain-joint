@@ -1,15 +1,21 @@
 """
-8通道 U-Net 训练与测试脚本 (架构统一版)
+8通道 U-Net 训练与测试脚本
+
+联合纹理 (RGB) 与高程 (DEM) 的扩散去噪训练。
+
+数据流:
+    输入: (RGB 512×512, DEM 512×512, 文本 prompt)
+      → VAE 编码: RGB [3,512,512] → latent [4,64,64] (×0.18215)
+                   DEM [1,512,512] → latent [4,64,64]
+      → 拼接 8 通道联合隐向量 [8,64,64] (ch 0-3 RGB, ch 4-7 DEM)
+      → CLIP 编码文本 → local features 注入 cross-attention
+      → DDPM 前向加噪 → UNet 预测噪声 → MSE (Min-SNR 加权)
+      → DDIM 去噪推理 (CFG) → VAE 解码 → 纹理图 + 高程图
 
 用法：
-    # 正常全新训练
     python ./scripts/unet/unet_full.py --mode train --epochs 50
-
-    # 自动寻找最新断点继续训练
-    python ./scripts/unet/unet_full.py --mode train --checkpoint ./outputs/unet_8ch/latest_checkpoint.pt
-
-    # 测试模式：批量生成地型并保存引擎可用的 PNG
-    python ./scripts/unet/unet_full.py --mode test --checkpoint ./outputs/unet_8ch/latest_checkpoint.pt --num_samples 5
+    python ./scripts/unet/unet_full.py --mode train --checkpoint <path>  # 续训
+    python ./scripts/unet/unet_full.py --mode test --checkpoint <path>   # 推理
 """
 
 import os
@@ -54,7 +60,7 @@ from models.vae.heightmap_vae import HeightMapVAE
 from models.clip.text_encoder import build_text_encoder
 
 # =============================================================================
-# 训练配置
+# 训练默认配置 (可通过命令行参数覆盖)
 # =============================================================================
 
 DATA_ROOT = "./data/unet_training"
@@ -66,11 +72,11 @@ BATCH_SIZE = 4
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 4
-USE_AMP = True
-VAL_SPLIT = 0.05
-SEED = 65
-USE_CFGE = 0.1
-GUIDANCE_SCALE = 4
+USE_AMP = True  # AMP fp16 混合精度，与 grad_checkpointing 互斥
+VAL_SPLIT = 0.05  # 验证集比例
+SEED = 65  # 固定种子保证 train/val 切分可复现
+USE_CFGE = 0.1  # CFG 训练中条件随机丢弃的概率
+GUIDANCE_SCALE = 4  # 推理时 CFG 引导系数
 
 VIZ_INTERVAL = 1
 
@@ -127,7 +133,9 @@ def build_8ch_unet_from_sd(device="cuda"):
     unet.config.in_channels = 8
     unet.config.out_channels = 8
 
-    print("正在执行精准阶梯式解冻...")
+    print("正在执行阶梯式解冻...")
+    # 策略: 冻结预训练 backbone，解冻 conv_in/conv_out (新通道) + 注意力层 +
+    #       浅层 encoder (down_blocks.0-1) 和深层 decoder (up_blocks.2-3)
     unet.requires_grad_(False)
     unet.conv_in.requires_grad_(True)
     unet.conv_out.requires_grad_(True)
@@ -150,6 +158,13 @@ def build_8ch_unet_from_sd(device="cuda"):
 
 
 class UNetTrainer:
+    """
+    8 通道 U-Net 训练器。
+
+    管理训练循环、可视化、checkpoint 持久化和推理生成。
+    冻结 CLIP / VAE，仅训练 U-Net (阶梯式解冻 + 分层学习率)。
+    """
+
     def __init__(self, unet, train_dataloader, val_dataloader, args):
         self.args = args
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -255,6 +270,16 @@ class UNetTrainer:
             f.write(self.val_prompt)
 
     def encode_to_latent(self, rgb_pixels, dem_pixels):
+        """
+        将 RGB 和 DEM 像素编码为 8 通道联合隐向量。
+
+        RGB [B,3,512,512] → SD VAE → [B,4,64,64] × 0.18215
+        DEM [B,1,512,512] → HeightMapVAE → [B,4,64,64]
+        → torch.cat → [B,8,64,64]  (ch 0-3: RGB, ch 4-7: DEM)
+
+        SD VAE 的 0.18215 缩放因子将隐向量归一化到单位方差附近，
+        HeightMapVAE 的输出已经接近单位方差，不额外缩放。
+        """
         rgb_latent = self.rgb_vae.encode(rgb_pixels).latent_dist.sample() * 0.18215
         if self.dem_vae is not None:
             dem_latent = self.dem_vae.encode(dem_pixels).latent_dist.sample()
@@ -329,9 +354,8 @@ class UNetTrainer:
                 )
                 noise_pred = output.sample
 
-                # Min SNR机制
-
-                gamma = 5.0  # 截断阈值，5.0 是业界标准推荐值
+                # Min-SNR 加权: 高噪声时间步 (低 SNR) loss 被截断，避免主导训练
+                gamma = 5.0
                 alphas_cumprod = self.train_scheduler.alphas_cumprod.to(self.device)
 
                 # 获取当前 Batch 时间步对应的 alpha 累乘值
@@ -356,10 +380,9 @@ class UNetTrainer:
 
                 loss_batch = loss_img_batch + loss_dem_batch
 
-                # 逐样本 Min-SNR 加权后取 batch 均值
+                # 逐样本 Min-SNR 加权 (per-sample weight 而非 per-element)
                 loss = (loss_batch * min_snr_weight).mean()
 
-                # 为了不影响下方进度条的打印，将独立 loss 也转为标量
                 loss_img = loss_img_batch.mean()
                 loss_dem = loss_dem_batch.mean()
 
@@ -399,6 +422,13 @@ class UNetTrainer:
 
     @torch.no_grad()
     def visualize_epoch(self, epoch: int):
+        """
+        每个 viz_interval 绘制训练仪表盘 (2x4):
+          - Loss 曲线 (总/纹理/高程)
+          - Ground Truth vs 生成的纹理图和高程图
+
+        内部运行一次 50 步 DDIM + CFG 推理来生成可视化样本。
+        """
         if len(self.loss_history) == 0:
             return
         self.unet.eval()
@@ -446,6 +476,8 @@ class UNetTrainer:
             latents = self.infer_scheduler.step(noise_pred, t, latents).prev_sample
 
         rgb_latent, dem_latent = torch.chunk(latents, 2, dim=1)
+
+        # RGB latent 解码: 逆缩放 (/ 0.18215) → VAE → [-1,1] → [0,1]
         rgb_latent = rgb_latent / 0.18215
 
         rgb_image = self.rgb_vae.decode(rgb_latent).sample
@@ -459,7 +491,7 @@ class UNetTrainer:
         gen_rgb_np = rgb_image[0].permute(1, 2, 0).cpu().numpy()
         gen_dem_np = dem_image[0][0].cpu().numpy()
 
-        # 对数逆归一化还原为物理高程 (uint16)
+        # 对数逆归一化: [0,1] 对数空间 → 物理高程 (米) → uint16
         p_low, min_log, max_log = (
             self.norm_params["p_low"],
             self.norm_params["min_log"],
@@ -540,6 +572,10 @@ class UNetTrainer:
         plt.close(fig)
 
     def train(self):
+        """
+        主训练循环: 逐 epoch 训练 → 保存 checkpoint → 可视化。
+        支持从 checkpoint 续训 (通过 load_checkpoint 设置 self.start_epoch)。
+        """
         print(f"=== 训练 8 通道 U-Net ===")
         print(f"Batch Size: {self.args.batch_size} | 目标 Epochs: {self.args.epochs}")
 
@@ -599,8 +635,12 @@ class UNetTrainer:
 
     @torch.no_grad()
     def test(self, num_samples: int):
-        """测试生成模式：批量生成地型并保存引擎可用的资产"""
-        print(f"\n=== 开始生成测试 (采样 {num_samples} 组) ===")
+        """
+        测试模式: 从 val 集取 prompt，DDIM + CFG 生成纹理图和高程图。
+
+        输出: {basename}_gen_texture.png (RGB) + {basename}_gen_heightmap.png (uint16 DEM)
+        """
+        print(f"\n=== 推理测试 (采样 {num_samples} 组) ===")
         self.unet.eval()
         test_dir = self.output_dir / "test_results_unet"
         test_dir.mkdir(parents=True, exist_ok=True)
@@ -676,6 +716,13 @@ class UNetTrainer:
         print(f"\n测试完成! 生成的模型资产已保存至: {test_dir}")
 
     def load_checkpoint(self, checkpoint_path):
+        """
+        加载 checkpoint 并恢复训练状态。
+
+        支持两种模式:
+          - 续训: 恢复权重 + 优化器 + scheduler + epoch/step 计数
+          - 微调 (--finetune): 仅加载权重，重置优化器和 scheduler
+        """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.unet.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
