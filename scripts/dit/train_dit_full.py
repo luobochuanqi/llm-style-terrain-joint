@@ -110,6 +110,8 @@ from models.clip.text_encoder import build_text_encoder
 DATA_ROOT = "./data/dit_training"
 DEM_VAE_CKPT = "./data/vae_model_data/best_checkpoint.pt"
 OUTPUT_DIR = "./outputs/dit"
+MODELS_DIR = "./data/models"
+USE_LOCAL_MODELS = True
 
 EPOCHS = 50
 BATCH_SIZE = 4
@@ -205,13 +207,24 @@ class DiTTrainer:
             )
 
         # 加载环境模型
-        print("正在加载 CLIP 和 VAE 环境...")
+        use_local = getattr(args, "use_local_models", USE_LOCAL_MODELS)
+        models_dir = getattr(args, "models_dir", MODELS_DIR)
+
+        if use_local:
+            clip_path = os.path.join(models_dir, "clip-vit-large-patch14")
+            vae_path = os.path.join(models_dir, "sd-vae-ft-mse")
+            print(f"正在从本地加载 CLIP 和 VAE 模型... (models_dir={models_dir})")
+        else:
+            clip_path = "openai/clip-vit-large-patch14"
+            vae_path = "stabilityai/sd-vae-ft-mse"
+            print("正在从 HuggingFace Hub 下载/加载 CLIP 和 VAE 模型...")
+
         self.text_encoder = build_text_encoder(
-            model_name="openai/clip-vit-large-patch14"
+            model_name=clip_path
         ).to(self.device)
         self.text_encoder.eval()
 
-        self.rgb_vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(
+        self.rgb_vae = AutoencoderKL.from_pretrained(vae_path).to(
             self.device
         )
         self.rgb_vae.eval().requires_grad_(False)
@@ -689,6 +702,18 @@ def main():
         "--finetune",
         action="store_true",
         help="微调模式：仅加载权重，重置优化器和调度器",
+    )
+    parser.add_argument(
+        "--use_local_models",
+        type=str2bool,
+        default=USE_LOCAL_MODELS,
+        help=f"使用本地已下载的 CLIP/VAE 模型 (默认: {USE_LOCAL_MODELS})",
+    )
+    parser.add_argument(
+        "--models_dir",
+        type=str,
+        default=MODELS_DIR,
+        help=f"本地模型目录 (默认: {MODELS_DIR})",
     )
 
     args = parser.parse_args()
