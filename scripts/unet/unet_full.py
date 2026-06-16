@@ -244,14 +244,10 @@ class UNetTrainer:
             vae_path = "stabilityai/sd-vae-ft-mse"
             print("正在从 HuggingFace Hub 下载/加载 CLIP 和 VAE 模型...")
 
-        self.text_encoder = build_text_encoder(
-            model_name=clip_path
-        ).to(self.device)
+        self.text_encoder = build_text_encoder(model_name=clip_path).to(self.device)
         self.text_encoder.eval()
 
-        self.rgb_vae = AutoencoderKL.from_pretrained(vae_path).to(
-            self.device
-        )
+        self.rgb_vae = AutoencoderKL.from_pretrained(vae_path).to(self.device)
         self.rgb_vae.eval().requires_grad_(False)
 
         if args.dem_vae_ckpt:
@@ -604,6 +600,10 @@ class UNetTrainer:
                 f"\nEpoch {epoch:3d} | Loss: {avg_loss['loss']:.4f} | Img: {avg_loss['img']:.4f} | Dem: {avg_loss['dem']:.4f}"
             )
 
+            self.loss_history.append(
+                (epoch, avg_loss["loss"], avg_loss["img"], avg_loss["dem"])
+            )
+
             trainable_state_dict = self.unet.state_dict()
 
             torch.save(
@@ -645,10 +645,6 @@ class UNetTrainer:
                     {"epoch": epoch, "model_state_dict": trainable_state_dict},
                     self.output_dir / f"checkpoint_epoch_{epoch:04d}.pt",
                 )
-
-            self.loss_history.append(
-                (epoch, avg_loss["loss"], avg_loss["img"], avg_loss["dem"])
-            )
             if epoch % self.args.viz_interval == 0 or epoch == self.args.epochs - 1:
                 self.visualize_epoch(epoch)
 
