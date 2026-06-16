@@ -28,4 +28,5 @@ docs/*_review.md
 docs/plans/*
 
 # Generated scripts
-scripts/download_*.py
+scripts/utils/download_*.py
+scripts/utils/hfd.sh

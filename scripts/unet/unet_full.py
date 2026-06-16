@@ -743,7 +743,7 @@ class UNetTrainer:
           - 微调 (--finetune): 仅加载权重，重置优化器和 scheduler
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.unet.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        self.unet.load_state_dict(checkpoint["model_state_dict"])
 
         if "optimizer_state_dict" in checkpoint and self.args.mode == "train":
             if getattr(self.args, "finetune", False):

@@ -649,7 +649,7 @@ class DiTTrainer:
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.dit.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        self.dit.load_state_dict(checkpoint["model_state_dict"])
 
         if "optimizer_state_dict" in checkpoint and self.args.mode == "train":
             if getattr(self.args, "finetune", False):
